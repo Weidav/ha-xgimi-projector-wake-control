@@ -9,6 +9,7 @@ dependencies = []
 [dependency-groups]
 dev = [
     "homeassistant>=2026.0.0",
+    "pyright>=1.1.0",
     "pytest-homeassistant-custom-component>=0.13.0",
     "pytest>=9.0.0",
     "ruff>=0.17.0",
@@ -19,6 +20,8 @@ line-length = 120
 
 [tool.pyright]
 typeCheckingMode = "strict"
+include = ["custom_components"]
+ignore = ["tests"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -76,6 +76,18 @@ def _make_mock_coordinator() -> MagicMock:
     coord.async_send_key = AsyncMock(return_value=True)
     coord.async_reboot = AsyncMock(return_value=True)
     coord.async_shutdown = AsyncMock()
+    coord.suppress_next_reload = False
+
+    def _check_and_reset() -> bool:
+        if getattr(coord, "suppress_next_reload", False) or getattr(coord, "_suppress_next_reload", False):
+            coord.suppress_next_reload = False
+            coord._suppress_next_reload = False
+            return True
+        return False
+
+    coord.check_and_reset_suppress_reload = MagicMock(side_effect=_check_and_reset)
+    coord.default_state = MagicMock(return_value={"online": False, "awake": False})
+    coord._default_state = coord.default_state
     return coord
 
 

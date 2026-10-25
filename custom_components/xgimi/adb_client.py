@@ -469,11 +469,11 @@ class XgimiAdbClient:
 
     async def async_send_key(self, keycode: int, timeout: float = 4.0) -> None:
         """Inject an Android keycode over the pooled ADB connection."""
-        if not isinstance(keycode, int) or isinstance(keycode, bool) or not (0 <= keycode <= 1000):
+        if type(keycode) is not int or not (0 <= keycode <= 1000):
             raise ValueError(f"Invalid Android keycode: {keycode}")
         await self.async_shell(f"input keyevent {keycode}", timeout=timeout)
 
-    def _close_transport_nowait(self) -> None:
+    def close_transport_nowait(self) -> None:
         """Close the cached writer without awaiting."""
         writer = self._writer
         self._reader = None
@@ -481,6 +481,8 @@ class XgimiAdbClient:
         if writer is not None:
             with contextlib.suppress(OSError, RuntimeError):
                 writer.close()
+
+    _close_transport_nowait = close_transport_nowait
 
     async def _close_transport_locked(self) -> None:
         """Close the cached transport (caller holds _cmd_lock)."""

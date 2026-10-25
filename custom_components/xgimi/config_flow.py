@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import Any
+from typing import Any, cast
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.data_entry_flow import FlowResult
 
 from .adb_client import AdbError, XgimiAdbClient
 from .const import (
@@ -28,12 +28,12 @@ from .const import (
     WOL_WAKE_PORT,
 )
 from .coordinator import (
-    _send_mdns_knock,
-    _send_tcp_knock,
-    _send_udp_knock,
     create_magic_packet,
     format_mac,
     resolve_mac_from_arp,
+    send_mdns_knock,
+    send_tcp_knock,
+    send_udp_knock,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -52,17 +52,17 @@ async def _send_setup_wowlan_knocks(hass: HomeAssistant, host: str, mac: str | N
     magic_payload = create_magic_packet(mac) or (b"\xff" * 102)
 
     def _sync_udp() -> None:
-        _send_udp_knock(host, WOL_WAKE_PORT, payload=magic_payload, repeat=3)
-        _send_udp_knock(host, WOL_DISCARD_PORT, payload=magic_payload, repeat=2)
-        _send_udp_knock(host, CAST_WAKE_PORT, payload=magic_payload, repeat=2)
-        _send_udp_knock(host, REMOTE_WAKE_PORT, payload=magic_payload, repeat=2)
-        _send_mdns_knock(host)
+        send_udp_knock(host, WOL_WAKE_PORT, payload=magic_payload, repeat=3)
+        send_udp_knock(host, WOL_DISCARD_PORT, payload=magic_payload, repeat=2)
+        send_udp_knock(host, CAST_WAKE_PORT, payload=magic_payload, repeat=2)
+        send_udp_knock(host, REMOTE_WAKE_PORT, payload=magic_payload, repeat=2)
+        send_mdns_knock(host)
 
     await hass.async_add_executor_job(_sync_udp)
     await asyncio.gather(
-        _send_tcp_knock(host, CAST_WAKE_PORT),
-        _send_tcp_knock(host, REMOTE_WAKE_PORT),
-        _send_tcp_knock(host, DEFAULT_ADB_PORT),
+        send_tcp_knock(host, CAST_WAKE_PORT),
+        send_tcp_knock(host, REMOTE_WAKE_PORT),
+        send_tcp_knock(host, DEFAULT_ADB_PORT),
         return_exceptions=True,
     )
 
@@ -97,7 +97,7 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._auth_task.cancel()
         self._auth_task = None
         if self._adb is not None:
-            self._adb._close_transport_nowait()
+            self._adb.close_transport_nowait()
 
     @staticmethod
     @callback
@@ -107,7 +107,7 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Get the options flow for this handler (modern zero-arg constructor)."""
         return XgimiOptionsFlowHandler()
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle Step 1: Host IP, Name, optional MAC, and initial ADB probe."""
         errors: dict[str, str] = {}
 
@@ -172,11 +172,11 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         return self.async_show_form(
             step_id="user",
-            data_schema=schema,
+            data_schema=cast(Any, schema),
             errors=errors,
         )
 
-    async def async_step_authorize(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_authorize(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle Step 2: Interactive ADB authorization prompt on the projector screen."""
         errors: dict[str, str] = {}
         if self._adb is None:
@@ -188,7 +188,7 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._auth_task = self.hass.async_create_task(self._adb.async_authorize(timeout=30.0))
             return self.async_show_form(
                 step_id="authorize",
-                data_schema=vol.Schema({}),
+                data_schema=cast(Any, vol.Schema({})),
                 description_placeholders={"host": self._host},
             )
 
@@ -221,12 +221,12 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors["base"] = "adb_not_authorized"
         return self.async_show_form(
             step_id="authorize",
-            data_schema=vol.Schema({}),
+            data_schema=cast(Any, vol.Schema({})),
             errors=errors,
             description_placeholders={"host": self._host},
         )
 
-    async def _async_finish_entry(self, host: str, name: str, mac: str | None) -> FlowResult:
+    async def _async_finish_entry(self, host: str, name: str, mac: str | None) -> ConfigFlowResult:
         """Set unique ID and create the ConfigEntry."""
         unique_id = mac or host.lower()
         await self.async_set_unique_id(unique_id)
@@ -246,7 +246,7 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class XgimiOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for XGIMI Projector Wake & Control using HA's modern zero-arg pattern."""
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Manage the XGIMI Projector options (host & MAC address)."""
         errors: dict[str, str] = {}
 
@@ -296,6 +296,6 @@ class XgimiOptionsFlowHandler(config_entries.OptionsFlow):
         )
         return self.async_show_form(
             step_id="init",
-            data_schema=schema,
+            data_schema=cast(Any, schema),
             errors=errors,
         )

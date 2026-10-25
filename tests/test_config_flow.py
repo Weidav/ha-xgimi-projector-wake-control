@@ -200,7 +200,8 @@ async def test_config_flow_wake_on_unreachable_and_interactive_authorize() -> No
     aborted_flow = XgimiConfigFlow()
     aborted_flow.hass = _make_flow_hass()
     hang_adb = MagicMock()
-    hang_adb._close_transport_nowait = MagicMock()
+    hang_adb.close_transport_nowait = MagicMock()
+    hang_adb._close_transport_nowait = hang_adb.close_transport_nowait
 
     async def _slow_auth(timeout: float = 30.0) -> bool:
         await asyncio.sleep(timeout)

@@ -36,7 +36,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryNotReady:
         _LOGGER.debug("XGIMI projector at %s is currently in standby during setup", host)
-        coordinator.data = coordinator._default_state(online=False, awake=False)
+        coordinator.data = coordinator.default_state(online=False, awake=False)
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
@@ -58,8 +58,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload config entry when options change."""
     coordinator: XgimiDataUpdateCoordinator | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    if getattr(coordinator, "_suppress_next_reload", False) is True:
-        coordinator._suppress_next_reload = False
+    if coordinator is not None and coordinator.check_and_reset_suppress_reload():
         return
     await hass.config_entries.async_reload(entry.entry_id)
 
@@ -77,7 +76,7 @@ class XgimiEntity(CoordinatorEntity[XgimiDataUpdateCoordinator]):
         self._attr_unique_id = f"{entry_id}_{unique_suffix}"
 
     @property
-    def device_info(self) -> DeviceInfo:
+    def device_info(self) -> DeviceInfo:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Return device registry information for this XGIMI projector."""
         data = self.coordinator.data or {}
         connections: set[tuple[str, str]] = set()

@@ -174,6 +174,11 @@ async def _send_tcp_knock(host: str, port: int, timeout: float = 0.8) -> None:
             await asyncio.wait_for(writer.wait_closed(), timeout=0.5)
 
 
+send_udp_knock = _send_udp_knock
+send_mdns_knock = _send_mdns_knock
+send_tcp_knock = _send_tcp_knock
+
+
 def parse_wakefulness(output: str) -> bool | None:
     """Parse Android dumpsys power output into True (Awake/Dreaming), False (Asleep/Dozing), or None."""
     if not output:
@@ -285,9 +290,9 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._model: str = name
         self._sw_version: str = "14"
         self._delayed_refresh_tasks: set[asyncio.Task[Any]] = set()
-        self._suppress_next_reload: bool = False
+        self.suppress_next_reload: bool = False
 
-    def _default_state(self, *, online: bool = False, awake: bool = False) -> dict[str, Any]:
+    def default_state(self, *, online: bool = False, awake: bool = False) -> dict[str, Any]:
         """Return a structured state dictionary."""
         return {
             "online": online,
@@ -299,25 +304,40 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "mac": self.mac,
         }
 
+    _default_state = default_state
+
+    def check_and_reset_suppress_reload(self) -> bool:
+        """Check if reload should be suppressed and reset the flag."""
+        if self.suppress_next_reload:
+            self.suppress_next_reload = False
+            return True
+        return False
+
+    @property
+    def _suppress_next_reload(self) -> bool:
+        return self.suppress_next_reload
+
+    @_suppress_next_reload.setter
+    def _suppress_next_reload(self, value: bool) -> None:
+        self.suppress_next_reload = value
+
     def _persist_discovered_mac(self, mac: str) -> None:
         """Persist auto-discovered MAC address into the ConfigEntry if not yet saved."""
         formatted = format_mac(mac)
         if not formatted:
             return
         self.mac = formatted
-        if self.config_entry is not None and self.hass is not None and not self.config_entry.data.get(CONF_MAC):
+        if self.config_entry is not None and not self.config_entry.data.get(CONF_MAC):
             new_data = {**self.config_entry.data, CONF_MAC: formatted}
-            self._suppress_next_reload = True
+            self.suppress_next_reload = True
             updated = False
             with contextlib.suppress(Exception):
                 updated = bool(self.hass.config_entries.async_update_entry(self.config_entry, data=new_data))
             if not updated:
-                self._suppress_next_reload = False
+                self.suppress_next_reload = False
 
     async def _send_cast_http_knock(self) -> None:
         """Send best-effort HTTP GET knock to Google Cast port 8010."""
-        if self.hass is None:
-            return
         url = f"http://{format_host(self.host)}:{CAST_WAKE_PORT}/setup/eureka_info"
         with contextlib.suppress(aiohttp.ClientError, TimeoutError, OSError, RuntimeError):
             session = async_get_clientsession(self.hass)
