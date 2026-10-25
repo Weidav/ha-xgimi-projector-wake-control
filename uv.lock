@@ -1798,7 +1798,7 @@ wheels = [
 
 [[package]]
 name = "ha-xgimi"
-version = "0.0.1"
+version = "0.0.2"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -1818,7 +1818,7 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "homeassistant", specifier = ">=2026.0.0" },
-    { name = "pyright", specifier = ">=1.1" },
+    { name = "pyright", specifier = ">=1.1.0" },
     { name = "pytest", specifier = ">=9.0.0" },
     { name = "pytest-homeassistant-custom-component", specifier = ">=0.13.0" },
     { name = "ruff", specifier = ">=0.17.0" },
