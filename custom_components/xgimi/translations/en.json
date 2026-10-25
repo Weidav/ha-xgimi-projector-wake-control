@@ -1,0 +1,44 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to XGIMI Projector Wake & Control",
+        "description": "Enter the IP address or hostname of your XGIMI projector (ensure Wireless ADB on port 5555 is enabled in Developer Options).",
+        "data": {
+          "host": "Host (IP address or hostname)",
+          "name": "Device Name",
+          "mac": "MAC Address (optional, auto-discovered if omitted)"
+        }
+      },
+      "authorize": {
+        "title": "Authorize ADB Connection",
+        "description": "Check your projector screen ({host}) for the **Allow USB debugging?** prompt, check **Always allow from this computer**, select **OK**, and then click **Submit**."
+      }
+    },
+    "error": {
+      "invalid_host": "Invalid hostname or IP address (do not include http:// or paths).",
+      "invalid_mac": "Invalid MAC address format (expected XX:XX:XX:XX:XX:XX).",
+      "cannot_connect": "Unable to reach projector ADB on port 5555. Verify the IP address and ensure ADB debugging is enabled.",
+      "adb_not_authorized": "ADB authorization was not approved on the projector yet. Please select 'Always allow from this computer' -> OK on the projector and try again."
+    },
+    "abort": {
+      "already_configured": "This XGIMI projector is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "XGIMI Projector Wake & Control Options",
+        "description": "Update the projector network host or Wake-on-LAN MAC address.",
+        "data": {
+          "host": "Host (IP address or hostname)",
+          "mac": "MAC Address (optional, auto-discovered if omitted)"
+        }
+      }
+    },
+    "error": {
+      "invalid_host": "Invalid hostname or IP address (do not include http:// or paths).",
+      "invalid_mac": "Invalid MAC address format (expected XX:XX:XX:XX:XX:XX)."
+    }
+  }
+}

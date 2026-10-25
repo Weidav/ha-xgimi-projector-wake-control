@@ -1,0 +1,61 @@
+name: Validate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  pytest-and-ruff:
+    name: Pytest & Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --frozen || uv sync
+
+      - name: Run Ruff linter & formatter check
+        run: |
+          uv run ruff check custom_components/xgimi tests/
+          uv run ruff format --check custom_components/xgimi tests/
+
+      - name: Run Pytest suite
+        run: uv run pytest -v
+
+  hassfest:
+    name: Hassfest Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Run Home Assistant Hassfest
+        uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Run HACS Action
+        uses: hacs/action@22.5.0
+        with:
+          category: integration
+          ignore: brands

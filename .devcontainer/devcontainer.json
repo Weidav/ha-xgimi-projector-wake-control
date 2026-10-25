@@ -1,0 +1,31 @@
+{
+    "name": "XGIMI HACS",
+    "image": "python:3.14-trixie",
+    "mounts": [
+        "source=antigravity-state,target=/home/vscode/.gemini,type=volume"
+    ],
+    "remoteEnv": {
+        "PATH": "/home/vscode/.local/bin:${containerEnv:PATH}"
+    },
+    "remoteUser": "vscode",
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "username": "vscode"
+        },
+        "ghcr.io/devcontainer-community/devcontainer-features/astral.sh-uv:1": {
+            "shellautocompletion": true
+        }
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "charliermarsh.ruff",
+                "keesschollaart.vscode-home-assistant",
+                "ms-python.python",
+                "tamasfe.even-better-toml",
+                "yzhang.markdown-all-in-one"
+            ]
+        }
+    },
+    "postCreateCommand": "sudo chown -R vscode:vscode \"$HOME/.gemini\" && curl -fsSL https://antigravity.google/cli/install.sh | bash && uv sync",
+}
