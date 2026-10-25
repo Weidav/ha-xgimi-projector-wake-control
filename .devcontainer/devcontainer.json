@@ -22,6 +22,7 @@
                 "charliermarsh.ruff",
                 "keesschollaart.vscode-home-assistant",
                 "ms-python.python",
+                "redhat.vscode-yaml",
                 "tamasfe.even-better-toml",
                 "yzhang.markdown-all-in-one"
             ]
