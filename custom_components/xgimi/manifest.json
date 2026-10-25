@@ -1,9 +1,6 @@
 {
   "domain": "xgimi",
   "name": "XGIMI Projector Wake & Control",
-  "categories": [
-    "media_entertainment.tv_streaming"
-  ],
   "codeowners": [
     "@Weidav"
   ],
