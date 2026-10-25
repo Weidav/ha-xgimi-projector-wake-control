@@ -1,7 +1,12 @@
 {
   "domain": "xgimi",
   "name": "XGIMI Projector Wake & Control",
-  "codeowners": ["@Weidav"],
+  "categories": [
+    "media_entertainment.tv_streaming"
+  ],
+  "codeowners": [
+    "@Weidav"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/Weidav/ha-xgimi-projector-wake-control",
   "integration_type": "device",
