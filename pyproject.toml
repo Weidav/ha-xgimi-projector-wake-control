@@ -1,6 +1,6 @@
 [project]
 name = "ha-xgimi"
-version = "1.0.0"
+version = "0.0.1"
 description = "Standalone Home Assistant HACS integration for XGIMI Projector Wake & Control"
 readme = "README.md"
 requires-python = ">=3.12"
