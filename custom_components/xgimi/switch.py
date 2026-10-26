@@ -41,11 +41,11 @@ class XgimiPowerSwitch(XgimiEntity, SwitchEntity):  # pyright: ignore[reportInco
         return True
 
     @property
-    def is_on(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]
-        """Return True if the projector display is awake."""
+    def is_on(self) -> bool | None:
+        """Return True if the projector display is awake, None if unknown."""
         if not self.coordinator.data:
             return False
-        return bool(self.coordinator.data.get("awake", False))
+        return self.coordinator.data.get("awake")
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the projector on via Two-Stage WoWLAN + ADB Wake."""

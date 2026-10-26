@@ -168,6 +168,10 @@ async def test_power_switch_and_device_info() -> None:
     assert sw.available is True
     assert sw.is_on is False
 
+    # Unknown wakefulness: is_on is None
+    coord.data = {"online": True, "awake": None}
+    assert sw.is_on is None
+
 
 @pytest.mark.asyncio
 async def test_binary_sensors_distinguish_fast_boot_standby() -> None:
@@ -195,6 +199,11 @@ async def test_binary_sensors_distinguish_fast_boot_standby() -> None:
     coord.data = {"online": False, "awake": False}
     assert power_sensor.is_on is False
     assert conn_sensor.is_on is False
+
+    # Unknown wakefulness: Power State is None
+    coord.data = {"online": True, "awake": None}
+    assert power_sensor.is_on is None
+    assert conn_sensor.is_on is True
 
 
 @pytest.mark.asyncio
