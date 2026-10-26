@@ -43,6 +43,7 @@ def _make_fake_hass() -> MagicMock:
     hass.async_add_executor_job = AsyncMock(side_effect=_async_add_executor_job)
     hass.async_create_task = lambda coro: asyncio.create_task(coro)
     hass.config_entries = MagicMock()
+    hass.config_entries.async_reload = AsyncMock()
     return hass
 
 
@@ -250,7 +251,6 @@ async def test_compound_poll_and_mac_persistence_and_commands() -> None:
     assert data["model"] == "XR14A"
     assert data["sw_version"] == "14"
     assert data["mac"] == "aa:bb:cc:11:22:33"
-    assert coord._suppress_next_reload is True
     hass.config_entries.async_update_entry.assert_called_once()
     assert hass.config_entries.async_update_entry.call_args.kwargs["data"][CONF_MAC] == "aa:bb:cc:11:22:33"
 
@@ -345,4 +345,51 @@ async def test_power_off_rechecks_state_on_ambiguous_disconnect() -> None:
     assert await coord.async_turn_off() is True
     assert adb.async_send_key.await_count == 1
     assert coord.data["awake"] is False
+    await coord.async_shutdown()
+
+
+def test_coordinator_constructor_no_blocking_arp_lookup() -> None:
+    """Verify coordinator constructor does not call resolve_mac_from_arp synchronously."""
+    hass = _make_fake_hass()
+    with patch("custom_components.xgimi.coordinator.resolve_mac_from_arp") as mock_arp:
+        coord = XgimiDataUpdateCoordinator(hass, "192.168.1.50", "XGIMI Horizon 20")
+        assert coord.mac is None
+        mock_arp.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mac_discovery_then_user_changes_host_reloads() -> None:
+    """Verify MAC discovery during initial refresh does not suppress subsequent host change reload."""
+    from custom_components.xgimi import DOMAIN, async_reload_entry
+
+    hass = _make_fake_hass()
+    entry = MagicMock()
+    entry.entry_id = "test_entry_mac_reload"
+    entry.data = {"host": "192.168.1.50"}
+    entry.options = {}
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(
+        return_value=(
+            "---WAKE---\nmWakefulness=Awake\n---META---\nXR14A\n14\naa:bb:cc:dd:ee:ff\n"
+        )
+    )
+
+    coord = XgimiDataUpdateCoordinator(hass, "192.168.1.50", "XGIMI", config_entry=entry, adb_client=adb)
+    hass.data = {DOMAIN: {entry.entry_id: coord}}
+
+    # Initial refresh discovers MAC
+    await coord._async_update_data()
+    assert coord.mac == "aa:bb:cc:dd:ee:ff"
+    entry.data = {"host": "192.168.1.50", CONF_MAC: "aa:bb:cc:dd:ee:ff"}
+
+    # Update listener triggers with same host -> does NOT reload
+    await async_reload_entry(hass, entry)
+    hass.config_entries.async_reload.assert_not_called()
+
+    # Now user updates host in options flow -> MUST reload!
+    entry.options = {"host": "192.168.1.60"}
+    await async_reload_entry(hass, entry)
+    hass.config_entries.async_reload.assert_called_once_with(entry.entry_id)
     await coord.async_shutdown()

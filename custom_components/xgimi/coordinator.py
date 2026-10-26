@@ -278,7 +278,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         configured_mac = (
             config_entry.options.get(CONF_MAC) or config_entry.data.get(CONF_MAC) if config_entry is not None else None
         )
-        self.mac: str | None = format_mac(configured_mac) or resolve_mac_from_arp(self.host)
+        self.mac: str | None = format_mac(configured_mac)
 
         self.adb = adb_client or XgimiAdbClient(self.host, port=self.adb_port, hass=hass)
 
@@ -291,7 +291,6 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._model: str = name
         self._sw_version: str = "14"
         self._delayed_refresh_tasks: set[asyncio.Task[Any]] = set()
-        self.suppress_next_reload: bool = False
 
     def default_state(self, *, online: bool = False, awake: bool | None = False) -> dict[str, Any]:
         """Return a structured state dictionary."""
@@ -307,21 +306,6 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     _default_state = default_state
 
-    def check_and_reset_suppress_reload(self) -> bool:
-        """Check if reload should be suppressed and reset the flag."""
-        if self.suppress_next_reload:
-            self.suppress_next_reload = False
-            return True
-        return False
-
-    @property
-    def _suppress_next_reload(self) -> bool:
-        return self.suppress_next_reload
-
-    @_suppress_next_reload.setter
-    def _suppress_next_reload(self, value: bool) -> None:
-        self.suppress_next_reload = value
-
     def _persist_discovered_mac(self, mac: str) -> None:
         """Persist auto-discovered MAC address into the ConfigEntry if not yet saved."""
         formatted = format_mac(mac)
@@ -330,12 +314,8 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.mac = formatted
         if self.config_entry is not None and not self.config_entry.data.get(CONF_MAC):
             new_data = {**self.config_entry.data, CONF_MAC: formatted}
-            self.suppress_next_reload = True
-            updated = False
             with contextlib.suppress(Exception):
-                updated = bool(self.hass.config_entries.async_update_entry(self.config_entry, data=new_data))
-            if not updated:
-                self.suppress_next_reload = False
+                self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
 
     async def _send_cast_http_knock(self) -> None:
         """Send best-effort HTTP GET knock to Google Cast port 8010."""

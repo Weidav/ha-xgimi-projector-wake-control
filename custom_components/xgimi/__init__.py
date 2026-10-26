@@ -11,8 +11,16 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_HOST, DEFAULT_HOST, DEFAULT_NAME, DOMAIN
-from .coordinator import XgimiDataUpdateCoordinator
+from .const import (
+    CONF_ADB_PORT,
+    CONF_HOST,
+    CONF_MAC,
+    DEFAULT_ADB_PORT,
+    DEFAULT_HOST,
+    DEFAULT_NAME,
+    DOMAIN,
+)
+from .coordinator import XgimiDataUpdateCoordinator, format_mac
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,10 +64,21 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload config entry when options change."""
+    """Reload config entry when options or effective connection settings change."""
     coordinator: XgimiDataUpdateCoordinator | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    if coordinator is not None and coordinator.check_and_reset_suppress_reload():
-        return
+    if coordinator is not None:
+        effective_host = entry.options.get(CONF_HOST) or entry.data.get(CONF_HOST, DEFAULT_HOST)
+        effective_port = entry.options.get(CONF_ADB_PORT) or entry.data.get(CONF_ADB_PORT, DEFAULT_ADB_PORT)
+        user_mac = format_mac(entry.options.get(CONF_MAC))
+
+        # Only reload if effective connection settings have changed from the active coordinator
+        if (
+            effective_host == coordinator.host
+            and effective_port == coordinator.adb_port
+            and (user_mac is None or user_mac == coordinator.mac)
+        ):
+            return
+
     await hass.config_entries.async_reload(entry.entry_id)
 
 

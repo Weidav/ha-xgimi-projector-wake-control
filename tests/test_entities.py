@@ -76,16 +76,7 @@ def _make_mock_coordinator() -> MagicMock:
     coord.async_send_key = AsyncMock(return_value=True)
     coord.async_reboot = AsyncMock(return_value=True)
     coord.async_shutdown = AsyncMock()
-    coord.suppress_next_reload = False
-
-    def _check_and_reset() -> bool:
-        if getattr(coord, "suppress_next_reload", False) or getattr(coord, "_suppress_next_reload", False):
-            coord.suppress_next_reload = False
-            coord._suppress_next_reload = False
-            return True
-        return False
-
-    coord.check_and_reset_suppress_reload = MagicMock(side_effect=_check_and_reset)
+    coord.adb_port = 5555
     coord.default_state = MagicMock(return_value={"online": False, "awake": False})
     coord._default_state = coord.default_state
     return coord
@@ -119,11 +110,13 @@ async def test_entry_setup_standby_fallback_and_unload() -> None:
     assert fake_coord.data == {"online": False, "awake": False}
     hass.config_entries.async_forward_entry_setups.assert_awaited_once_with(entry, PLATFORMS)
 
-    fake_coord._suppress_next_reload = True
+    # When options have same effective connection settings, reload is not triggered
+    entry.options = {}
     await async_reload_entry(hass, entry)
     hass.config_entries.async_reload.assert_not_awaited()
-    assert fake_coord._suppress_next_reload is False
 
+    # When effective connection settings change (e.g. host changed), reload is triggered
+    entry.options = {"host": "192.168.1.99"}
     await async_reload_entry(hass, entry)
     hass.config_entries.async_reload.assert_awaited_once_with("entry_123")
 
