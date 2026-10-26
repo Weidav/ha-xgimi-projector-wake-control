@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 import pytest
 
-from custom_components.xgimi.adb_client import AdbConnectionError
+from custom_components.xgimi.adb_client import AdbConnectionError, AdbError
 from custom_components.xgimi.const import (
     CAST_WAKE_PORT,
     CONF_MAC,
@@ -685,3 +685,147 @@ async def test_competing_power_off_followed_immediately_by_on() -> None:
     assert coord.data["awake"] is True
 
     await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [AdbError, TimeoutError, OSError, AdbConnectionError])
+async def test_competing_power_off_followed_by_on_transient_error(error_type: type[Exception]) -> None:
+    """Verify transient ADB errors during shutdown settling do not cause early wake race."""
+    awake = True
+    off_requested = False
+    injected_error = False
+    keys: list[int] = []
+    tasks: list[asyncio.Task[None]] = []
+
+    async def delayed_off() -> None:
+        nonlocal awake
+        await asyncio.sleep(0.08)
+        awake = False
+
+    async def shell(command: str, **kwargs: object) -> str:
+        nonlocal injected_error
+        if off_requested and not injected_error:
+            injected_error = True
+            raise error_type("Transient query failure while still awake")
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake, off_requested
+        keys.append(keycode)
+        if keycode == KEYCODE_POWER:
+            off_requested = True
+            tasks.append(asyncio.create_task(delayed_off()))
+        elif keycode == KEYCODE_WAKEUP:
+            awake = True
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            results = await asyncio.gather(
+                coord.async_turn_off(),
+                coord.async_turn_on(wake_timeout=1.0, poll_interval=0.01),
+            )
+        await asyncio.gather(*tasks)
+        assert results == [True, True]
+        assert awake is True
+        assert coord.data["awake"] is True
+        assert KEYCODE_WAKEUP in keys
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_power_off_then_on_multiple_transient_errors_settling() -> None:
+    """Verify multiple transient errors during shutdown settling preserve pending shutdown."""
+    awake = True
+    off_requested = False
+    injected_errors = 0
+    keys: list[int] = []
+    tasks: list[asyncio.Task[None]] = []
+
+    async def delayed_off() -> None:
+        nonlocal awake
+        await asyncio.sleep(0.08)
+        awake = False
+
+    async def shell(command: str, **kwargs: object) -> str:
+        nonlocal injected_errors
+        if off_requested and injected_errors < 2:
+            injected_errors += 1
+            raise AdbError("Transient query failure")
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake, off_requested
+        keys.append(keycode)
+        if keycode == KEYCODE_POWER:
+            off_requested = True
+            tasks.append(asyncio.create_task(delayed_off()))
+        elif keycode == KEYCODE_WAKEUP:
+            awake = True
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            results = await asyncio.gather(
+                coord.async_turn_off(),
+                coord.async_turn_on(wake_timeout=1.0, poll_interval=0.01),
+            )
+        await asyncio.gather(*tasks)
+        assert results == [True, True]
+        assert awake is True
+        assert coord.data["awake"] is True
+        assert KEYCODE_WAKEUP in keys
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_power_off_then_on_sustained_deep_sleep_disconnect() -> None:
+    """Verify sustained connection loss during shutdown settling breaks to Stage 1 WoWLAN wake."""
+    in_deep_sleep = False
+    wowlan_called = False
+    awake = False
+
+    async def fake_wowlan() -> None:
+        nonlocal in_deep_sleep, awake, wowlan_called
+        wowlan_called = True
+        in_deep_sleep = False
+        awake = True
+
+    async def shell(command: str, **kwargs: object) -> str:
+        nonlocal in_deep_sleep, awake
+        if in_deep_sleep:
+            raise AdbConnectionError("Connection closed: projector in deep sleep")
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal in_deep_sleep, awake
+        if keycode == KEYCODE_POWER:
+            in_deep_sleep = True
+            awake = False
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        awake = True
+        with patch.object(coord, "_send_wowlan_knocks", side_effect=fake_wowlan):
+            assert await coord.async_turn_off() is True
+            assert in_deep_sleep is True
+            assert await coord.async_turn_on(wake_timeout=2.0, poll_interval=0.01) is True
+        assert wowlan_called is True
+        assert awake is True
+        assert coord.data["awake"] is True
+    finally:
+        await coord.async_shutdown()

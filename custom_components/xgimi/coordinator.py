@@ -531,19 +531,34 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
             deadline = time.monotonic() + wake_timeout
 
             # Off request recently executed: wait for hardware to settle into standby before waking
-            if now < self._power_transition_until and self._optimistic_awake is False:
+            shutdown_pending = now < self._power_transition_until and self._optimistic_awake is False
+            settled_to_standby = False
+            settle_deadline = min(self._power_transition_until, deadline)
+
+            if shutdown_pending:
                 settled = False
-                settle_deadline = min(self._power_transition_until, deadline)
+                consecutive_errors = 0
                 while time.monotonic() < settle_deadline:
                     rem_settle = max(0.01, settle_deadline - time.monotonic())
                     try:
                         settle_state = await self._async_read_wakefulness(timeout=min(2.0, rem_settle))
+                        consecutive_errors = 0
                         if settle_state is False:
                             settled = True
+                            settled_to_standby = True
                             break
-                    except (AdbError, TimeoutError, OSError):
-                        settled = True
-                        break
+                    except (AdbError, TimeoutError, OSError) as err:
+                        consecutive_errors += 1
+                        _LOGGER.debug(
+                            "Transient ADB error during standby settle poll for %s (consecutive=%d): %s",
+                            self.host,
+                            consecutive_errors,
+                            err,
+                        )
+                        if consecutive_errors >= 3:
+                            # Sustained connection loss indicates the device entered deep sleep
+                            settled = True
+                            break
                     sleep_time = min(0.2, poll_interval, max(0.001, settle_deadline - time.monotonic()))
                     await asyncio.sleep(sleep_time)
 
@@ -561,6 +576,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                 self._power_transition_until = 0.0
 
             attempt = 0
+            offline_observed = False
 
             while True:
                 if attempt % 2 == 0:
@@ -570,6 +586,14 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                 try:
                     awake = await self._async_read_wakefulness(timeout=2.5)
                     if awake is True:
+                        if shutdown_pending and not settled_to_standby and not offline_observed:
+                            # Pre-off Awake: hardware is still finishing shutdown.
+                            # Continue waiting for hardware to reach standby or settle deadline.
+                            now = time.monotonic()
+                            if now < settle_deadline:
+                                sleep_time = min(0.2, poll_interval, max(0.001, settle_deadline - now))
+                                await asyncio.sleep(sleep_time)
+                                continue
                         self._mark_power_transition(awake=True)
                         return True
 
@@ -582,6 +606,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                     self._mark_power_transition(awake=True)
                     return True
                 except (AdbError, TimeoutError, OSError) as err:
+                    offline_observed = True
                     _LOGGER.debug(
                         "Stage-2 ADB wake poll attempt %d for %s pending: %s",
                         attempt,
