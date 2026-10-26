@@ -128,9 +128,7 @@ def is_safe_to_retry_command(command: str) -> bool:
         return False
     if "keyevent" in cmd:
         return False
-    if "reboot" in cmd or "powerctl" in cmd:
-        return False
-    return True
+    return not ("reboot" in cmd or "powerctl" in cmd)
 
 
 class XgimiAdbClient:

@@ -41,7 +41,7 @@ class XgimiPowerBinarySensor(XgimiEntity, BinarySensorEntity):  # pyright: ignor
         super().__init__(coordinator, "power_state")
 
     @property
-    def is_on(self) -> bool | None:
+    def is_on(self) -> bool | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Return True when the projector is Awake (display on), None if unknown."""
         if not self.coordinator.data:
             return False

@@ -41,7 +41,7 @@ class XgimiPowerSwitch(XgimiEntity, SwitchEntity):  # pyright: ignore[reportInco
         return True
 
     @property
-    def is_on(self) -> bool | None:
+    def is_on(self) -> bool | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Return True if the projector display is awake, None if unknown."""
         if not self.coordinator.data:
             return False
