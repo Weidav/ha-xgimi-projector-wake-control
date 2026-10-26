@@ -7,6 +7,7 @@ import base64
 import contextlib
 import struct
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from cryptography.hazmat.primitives import hashes
@@ -47,11 +48,13 @@ class FakeAdbdServer:
         accept_pubkey: bool = True,
         immediate_cnxn: bool = False,
         drop_first_open: bool = False,
+        hang_handshake: bool = False,
     ) -> None:
         self.accept_signature = accept_signature
         self.accept_pubkey = accept_pubkey
         self.immediate_cnxn = immediate_cnxn
         self.drop_first_open = drop_first_open
+        self.hang_handshake = hang_handshake
 
         self.received_auth_types: list[int] = []
         self.executed_commands: list[str] = []
@@ -88,6 +91,10 @@ class FakeAdbdServer:
         try:
             cmd, _arg0, _arg1, _payload = await self._read_msg(reader)
             if cmd != A_CNXN:
+                return
+
+            if self.hang_handshake:
+                await asyncio.sleep(10.0)
                 return
 
             if self.immediate_cnxn:
@@ -151,6 +158,17 @@ class FakeAdbdServer:
                         await self._write_msg(writer, A_OKAY, remote_id, local_id)
                         writer.close()
                         await writer.wait_closed()
+                        return
+
+                    if shell_cmd == "slow_stream":
+                        await self._write_msg(writer, A_OKAY, remote_id, local_id)
+                        for _ in range(15):
+                            await asyncio.sleep(0.02)
+                            await self._write_msg(writer, A_WRTE, remote_id, local_id, b"chunk\n")
+                            ok_cmd, _, _, _ = await self._read_msg(reader)
+                            assert ok_cmd == A_OKAY
+                        await self._write_msg(writer, A_CLSE, remote_id, local_id)
+                        await self._read_msg(reader)
                         return
 
                     await self._write_msg(writer, A_OKAY, remote_id, local_id)
@@ -372,3 +390,54 @@ async def test_adb_error_paths(adb_key_file: Path) -> None:
     reader.feed_data(struct.pack("<6I", A_CNXN, VERSION, MAX_PAYLOAD, 0, 0, 0xDEADBEEF))
     with pytest.raises(AdbError, match="Corrupt ADB header magic"):
         await XgimiAdbClient._read_message(reader, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_shell_total_timeout_bounds_execution(adb_key_file: Path) -> None:
+    """Verify shell output arriving within packet timeout is aborted when exceeding total command deadline."""
+    server = FakeAdbdServer(accept_signature=True)
+    await server.start()
+    try:
+        client = XgimiAdbClient("127.0.0.1", port=server.port, key_path=adb_key_file)
+        start = asyncio.get_running_loop().time()
+        with pytest.raises(TimeoutError):
+            await client.async_shell("slow_stream", timeout=0.08)
+        elapsed = asyncio.get_running_loop().time() - start
+        assert elapsed < 0.25
+        assert client._writer is None
+        await client.async_close()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_handshake_cancellation_cleans_up_socket(adb_key_file: Path) -> None:
+    """Verify cancelling during handshake closes the newly opened socket."""
+    server = FakeAdbdServer(hang_handshake=True)
+    await server.start()
+    try:
+        client = XgimiAdbClient("127.0.0.1", port=server.port, key_path=adb_key_file)
+
+        closed_writers: list[asyncio.StreamWriter] = []
+        orig_close_writer = XgimiAdbClient._close_writer
+
+        async def _tracking_close_writer(writer: asyncio.StreamWriter) -> None:
+            closed_writers.append(writer)
+            await orig_close_writer(writer)
+
+        with patch.object(XgimiAdbClient, "_close_writer", side_effect=_tracking_close_writer):
+            task = asyncio.create_task(client.async_shell("echo hi", timeout=5.0))
+            for _ in range(50):
+                if server.connections_made > 0:
+                    break
+                await asyncio.sleep(0.01)
+            assert server.connections_made > 0
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            assert len(closed_writers) > 0
+            assert client._writer is None
+    finally:
+        await server.stop()

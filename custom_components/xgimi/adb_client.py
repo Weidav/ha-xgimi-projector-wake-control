@@ -12,6 +12,7 @@ import contextlib
 import logging
 import os
 import struct
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -354,6 +355,7 @@ class XgimiAdbClient:
         except (TimeoutError, OSError) as err:
             raise AdbConnectionError(f"Unable to connect to ADB at {self.host}:{self.port}: {err}") from err
 
+        connected = False
         try:
             authorized = await self._handshake(
                 reader,
@@ -361,17 +363,20 @@ class XgimiAdbClient:
                 prompt_on_reject=False,
                 auth_timeout=timeout,
             )
+            if not authorized:
+                raise AdbAuthError(f"ADB key not authorized on projector {self.host}:{self.port}")
+
+            self._reader = reader
+            self._writer = writer
+            connected = True
+            return reader, writer
         except (TimeoutError, OSError, asyncio.IncompleteReadError, AdbError) as err:
-            await self._close_writer(writer)
+            if isinstance(err, AdbAuthError):
+                raise
             raise AdbConnectionError(f"ADB handshake failed with {self.host}:{self.port}: {err}") from err
-
-        if not authorized:
-            await self._close_writer(writer)
-            raise AdbAuthError(f"ADB key not authorized on projector {self.host}:{self.port}")
-
-        self._reader = reader
-        self._writer = writer
-        return reader, writer
+        finally:
+            if not connected:
+                await self._close_writer(writer)
 
     async def _run_shell_stream_locked(self, command: str, timeout: float) -> str:
         """Open a single shell:<command> stream on the authenticated connection and collect output."""
@@ -411,37 +416,48 @@ class XgimiAdbClient:
 
     async def async_shell(self, command: str, timeout: float = 5.0) -> str:
         """Execute a bounded shell command over ADB, retrying once if a pooled socket went stale."""
+        deadline = time.monotonic() + timeout
         async with self._cmd_lock:
-            had_existing_conn = self._writer is not None
-            try:
-                return await self._run_shell_stream_locked(command, timeout=timeout)
-            except AdbAuthError:
-                await self._close_transport_locked()
-                raise
-            except (TimeoutError, OSError, asyncio.IncompleteReadError, AdbError) as err:
-                await self._close_transport_locked()
-                if not had_existing_conn:
-                    if isinstance(err, AdbError):
-                        raise
-                    raise AdbConnectionError(f"ADB shell command failed on {self.host}:{self.port}: {err}") from err
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Timed out waiting for ADB command lock for {command}")
+            async with asyncio.timeout(remaining):
+                had_existing_conn = self._writer is not None
                 try:
-                    return await self._run_shell_stream_locked(command, timeout=timeout)
+                    rem = max(0.01, deadline - time.monotonic())
+                    return await self._run_shell_stream_locked(command, timeout=rem)
                 except AdbAuthError:
                     await self._close_transport_locked()
                     raise
-                except (TimeoutError, OSError, asyncio.IncompleteReadError, AdbError) as retry_err:
+                except (TimeoutError, OSError, asyncio.IncompleteReadError, AdbError) as err:
                     await self._close_transport_locked()
-                    if isinstance(retry_err, AdbError):
+                    if isinstance(err, TimeoutError):
                         raise
-                    raise AdbConnectionError(
-                        f"ADB shell command failed after reconnect to {self.host}:{self.port}: {retry_err}"
-                    ) from retry_err
+                    if not had_existing_conn:
+                        if isinstance(err, AdbError):
+                            raise
+                        raise AdbConnectionError(f"ADB shell command failed on {self.host}:{self.port}: {err}") from err
+                    try:
+                        rem = deadline - time.monotonic()
+                        if rem <= 0:
+                            raise TimeoutError(f"Timed out before ADB retry for {command}")
+                        return await self._run_shell_stream_locked(command, timeout=rem)
+                    except AdbAuthError:
+                        await self._close_transport_locked()
+                        raise
+                    except (TimeoutError, OSError, asyncio.IncompleteReadError, AdbError) as retry_err:
+                        await self._close_transport_locked()
+                        if isinstance(retry_err, (AdbError, TimeoutError)):
+                            raise
+                        raise AdbConnectionError(
+                            f"ADB shell command failed after reconnect to {self.host}:{self.port}: {retry_err}"
+                        ) from retry_err
+                    except BaseException:
+                        self.close_transport_nowait()
+                        raise
                 except BaseException:
-                    self._close_transport_nowait()
+                    self.close_transport_nowait()
                     raise
-            except BaseException:
-                self._close_transport_nowait()
-                raise
 
     async def async_send_key(self, keycode: int, timeout: float = 4.0) -> None:
         """Inject an Android keycode over the pooled ADB connection."""
