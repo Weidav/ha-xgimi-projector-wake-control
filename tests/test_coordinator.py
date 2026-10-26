@@ -433,7 +433,64 @@ async def test_android_input_switch_failure_reported_as_error() -> None:
     success_not_found = await coord.async_set_input_source(INPUT_SOURCE_APPS)
     assert success_not_found is False
 
+    # Output with permission denied is a failure
+    adb.async_shell = AsyncMock(return_value="/system/bin/sh: am: Permission denied")
+    success_perm = await coord.async_set_input_source(INPUT_SOURCE_APPS)
+    assert success_perm is False
+
+    # Output with broken pipe / failure calling service activity is a failure
+    adb.async_shell = AsyncMock(return_value="cmd: Failure calling service activity: Broken pipe (32)")
+    success_broken_pipe = await coord.async_set_input_source(INPUT_SOURCE_HDMI1)
+    assert success_broken_pipe is False
+
+    # Output with generic exit status failure
+    adb.async_shell = AsyncMock(return_value="exit status 1")
+    success_exit_code = await coord.async_set_input_source(INPUT_SOURCE_HDMI1)
+    assert success_exit_code is False
+
     await coord.async_shutdown()
+
+
+def test_is_android_shell_error_rules() -> None:
+    """Verify is_android_shell_error properly identifies failures and allowed warnings."""
+    from custom_components.xgimi.coordinator import is_android_shell_error
+
+    assert is_android_shell_error("Permission denied") is True
+    assert is_android_shell_error("cmd: Failure calling service activity: Broken pipe (32)") is True
+    assert is_android_shell_error("Activity not started, intent aborted") is True
+    assert is_android_shell_error("Error type 3") is True
+    assert is_android_shell_error("exit status 1") is True
+    assert is_android_shell_error("rc=127") is True
+    assert is_android_shell_error("rc: 1") is True
+    assert is_android_shell_error("exit: 127") is True
+    assert is_android_shell_error("return code: 2") is True
+    assert is_android_shell_error("Access denied") is True
+    assert is_android_shell_error("Killed") is True
+    assert is_android_shell_error("Segmentation fault") is True
+
+    # Error takes precedence over informational foregrounding message
+    assert (
+        is_android_shell_error(
+            "Warning: Activity not started, its current task has been brought to the front\n"
+            "cmd: Failure calling service activity: Broken pipe (32)"
+        )
+        is True
+    )
+
+    # Allowed non-error informational states
+    assert (
+        is_android_shell_error("Warning: Activity not started, its current task has been brought to the front") is False
+    )
+    assert (
+        is_android_shell_error(
+            "Warning: Activity not started, intent has been delivered to currently running top-level activity"
+        )
+        is False
+    )
+    assert is_android_shell_error("") is False
+    assert is_android_shell_error("Starting: Intent { act=android.intent.action.VIEW }") is False
+    assert is_android_shell_error("exit status 0") is False
+    assert is_android_shell_error("rc=0") is False
 
 
 @pytest.mark.asyncio
@@ -446,6 +503,63 @@ async def test_active_hdmi_detection_on_start_and_remote_change() -> None:
     assert parse_active_hdmi_input(sample_hdmi2) == INPUT_SOURCE_HDMI2
     assert parse_active_hdmi_input(sample_hdmi1) == INPUT_SOURCE_HDMI1
     assert parse_active_hdmi_input("") is None
+
+    # Synthetic sample containing HDMI 1 before an explicit current-input marker for HDMI 2
+    synthetic_hdmi1_before_mcurid_hdmi2 = (
+        "TvInputInfo{mId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW5, mHdmiPortId=1}\n"
+        "mCurId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW6\n"
+    )
+    assert parse_active_hdmi_input(synthetic_hdmi1_before_mcurid_hdmi2) == INPUT_SOURCE_HDMI2
+
+    # Synthetic sample with currentInputId marker
+    synthetic_current_input_id = (
+        "inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW5\n"
+        "currentInputId: com.mediatek.tvinput/.hdmi.HDMIInputService/HW6\n"
+    )
+    assert parse_active_hdmi_input(synthetic_current_input_id) == INPUT_SOURCE_HDMI2
+
+    # Synthetic sample with SessionState for HDMI 2 after HDMI 1 mention
+    synthetic_session_hdmi2 = (
+        "TvInputState: com.mediatek.tvinput/.hdmi.HDMIInputService/HW5\n"
+        "SessionState: inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW6\n"
+    )
+    assert parse_active_hdmi_input(synthetic_session_hdmi2) == INPUT_SOURCE_HDMI2
+
+    # Active session line with mInputId
+    synthetic_minputid_hdmi2 = "mInputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW6\n"
+    assert parse_active_hdmi_input(synthetic_minputid_hdmi2) == INPUT_SOURCE_HDMI2
+
+    # Explicit non-HDMI current input suppresses falling back to dormant HDMI sessions
+    non_hdmi_current_with_hdmi_session = (
+        "mCurId=com.google.android.tv.dtv/DTV\nSessionState: inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW5\n"
+    )
+    assert parse_active_hdmi_input(non_hdmi_current_with_hdmi_session) is None
+
+    # Ambiguous generic data (both inputs present without active session marker) -> None
+    ambiguous_inputs = (
+        "inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW5\n"
+        "inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW6\n"
+    )
+    assert parse_active_hdmi_input(ambiguous_inputs) is None
+
+    # Single generic registration line without active session marker -> None (unknown)
+    single_registration_line = "TvInputInfo{mId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW5, mHdmiPortId=1}\n"
+    assert parse_active_hdmi_input(single_registration_line) is None
+
+    # mCurId=null with generic non-session line -> None (no active session)
+    mcurid_null_with_generic = "mCurId=null\ninputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW5\n"
+    assert parse_active_hdmi_input(mcurid_null_with_generic) is None
+
+    # Conflicting active session markers -> None
+    conflicting_sessions = (
+        "SessionState: inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW5\n"
+        "SessionState: inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW6\n"
+    )
+    assert parse_active_hdmi_input(conflicting_sessions) is None
+
+    # mCurId=null falls through to active SessionState
+    mcurid_null_with_session = "mCurId=null\nSessionState: inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW5\n"
+    assert parse_active_hdmi_input(mcurid_null_with_session) == INPUT_SOURCE_HDMI1
 
     hass = _make_fake_hass()
     adb = MagicMock()
@@ -489,5 +603,85 @@ async def test_active_hdmi_detection_on_start_and_remote_change() -> None:
     data_unknown = coord._parse_compound_poll(poll_unknown_hdmi)
     assert data_unknown["input_source"] is None
     assert coord._current_input_source is None
+
+    await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_competing_power_off_followed_immediately_by_on() -> None:
+    """Verify off followed immediately by on waits for hardware settle and ends awake."""
+    hass = _make_fake_hass()
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+
+    simulated_state = "Awake"
+    settle_polls_left = 0
+
+    async def fake_send_key(keycode: int, timeout: float = 4.0) -> None:
+        nonlocal simulated_state, settle_polls_left
+        if keycode == KEYCODE_POWER:
+            if simulated_state == "Awake":
+                settle_polls_left = 2
+            elif simulated_state == "Asleep":
+                simulated_state = "Awake"
+        elif keycode == KEYCODE_WAKEUP and simulated_state == "Asleep":
+            simulated_state = "Awake"
+
+    async def fake_shell(cmd: str, timeout: float = 5.0, retry: bool | None = None) -> str:
+        nonlocal simulated_state, settle_polls_left
+        if "mWakefulness" in cmd or "dumpsys power" in cmd:
+            if settle_polls_left > 0:
+                settle_polls_left -= 1
+                if settle_polls_left == 0:
+                    simulated_state = "Asleep"
+                return "mWakefulness=Awake"
+            return f"mWakefulness={simulated_state}"
+        return ""
+
+    adb.async_send_key = AsyncMock(side_effect=fake_send_key)
+    adb.async_shell = AsyncMock(side_effect=fake_shell)
+
+    coord = XgimiDataUpdateCoordinator(hass, "192.168.1.50", "XGIMI Horizon 20", adb_client=adb)
+
+    # 1. Turn off while awake
+    assert await coord.async_turn_off() is True
+
+    # 2. Immediately turn on while simulated hardware is still in settling transition
+    with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+        assert await coord.async_turn_on(wake_timeout=2.0, poll_interval=0.01) is True
+
+    # Simulated hardware must have settled to Asleep, received wake key, and ended Awake
+    assert simulated_state == "Awake"
+    assert coord.data["awake"] is True
+    assert coord.data["online"] is True
+
+    # 3. If turn_on timeout expires while hardware is still settling off, return False
+    assert await coord.async_turn_off() is True
+    settle_polls_left = 50
+    with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+        assert await coord.async_turn_on(wake_timeout=0.01, poll_interval=0.005) is False
+
+    # 4. Turn on settles when ADB disconnects (AdbConnectionError) as hardware sleeps
+    settle_polls_left = 0
+    simulated_state = "Awake"
+    assert await coord.async_turn_off() is True
+
+    disconnect_once = True
+
+    async def shell_with_disconnect(cmd: str, timeout: float = 5.0, retry: bool | None = None) -> str:
+        nonlocal disconnect_once, simulated_state
+        if "mWakefulness" in cmd or "dumpsys power" in cmd:
+            if disconnect_once:
+                disconnect_once = False
+                simulated_state = "Asleep"
+                raise AdbConnectionError("Connection closed by peer")
+            return f"mWakefulness={simulated_state}"
+        return ""
+
+    adb.async_shell = AsyncMock(side_effect=shell_with_disconnect)
+    with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+        assert await coord.async_turn_on(wake_timeout=2.0, poll_interval=0.01) is True
+    assert simulated_state == "Awake"
+    assert coord.data["awake"] is True
 
     await coord.async_shutdown()

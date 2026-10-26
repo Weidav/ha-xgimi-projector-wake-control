@@ -498,3 +498,33 @@ async def test_concurrent_key_initialization_shares_key(tmp_path: Path) -> None:
     # Verify key persisted on disk also matches
     _disk_priv, disk_pub = client1._load_or_create_key_sync()
     assert pub1.public_numbers().n == disk_pub.public_numbers().n
+
+
+@pytest.mark.asyncio
+async def test_shell_total_timeout_includes_lock_acquisition(adb_key_file: Path) -> None:
+    """Verify lock acquisition is bounded by total timeout and does not wait for lock release."""
+    client = XgimiAdbClient("127.0.0.1", port=5555, key_path=adb_key_file)
+    await client._cmd_lock.acquire()
+
+    async def _release_later() -> None:
+        await asyncio.sleep(0.150)
+        client._cmd_lock.release()
+
+    release_task = asyncio.create_task(_release_later())
+    start = asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(TimeoutError):
+            await client.async_shell("echo test", timeout=0.030)
+        elapsed = asyncio.get_running_loop().time() - start
+        assert elapsed < 0.100, f"Expected timeout within ~0.030s, but took {elapsed:.3f}s"
+        assert client._cmd_lock.locked()
+
+        # Also verify async_send_key timeout bounds lock acquisition
+        start_key = asyncio.get_running_loop().time()
+        with pytest.raises(TimeoutError):
+            await client.async_send_key(26, timeout=0.030)
+        elapsed_key = asyncio.get_running_loop().time() - start_key
+        assert elapsed_key < 0.100, f"Expected async_send_key timeout within ~0.030s, took {elapsed_key:.3f}s"
+    finally:
+        await release_task
+        await client.async_close()

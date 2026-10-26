@@ -58,27 +58,83 @@ POLL_SHELL_COMMAND = (
 )
 
 
+CURRENT_INPUT_LINE_RE = re.compile(
+    r"\b(?:mCurId|currentInputId|mCurInputId|curInputId|activeInputId|current_input_id|currentInput)\b",
+    re.IGNORECASE,
+)
+ACTIVE_SESSION_LINE_RE = re.compile(
+    r"\b(?:sessionState|mSessionState|mSession|mInputId|sessionId)\b",
+    re.IGNORECASE,
+)
+
+
 def is_android_shell_error(output: str) -> bool:
     """Check if Android shell output indicates an execution error."""
     if not output:
         return False
     lower = output.lower()
+
+    # Non-zero exit status / return codes take precedence as execution failure
+    if re.search(r"\b(?:exit\s*(?:code|status)?|return\s*code|rc)\s*[:=]?\s*([1-9]\d*)\b", lower):
+        return True
+    if re.search(r"\bexit\s+([1-9]\d*)\b", lower):
+        return True
+
+    # Definite fatal failure indicators
+    if any(
+        err in lower
+        for err in (
+            "error",
+            "failure",
+            "failed",
+            "exception",
+            "permission denied",
+            "permission denial",
+            "access denied",
+            "broken pipe",
+            "unable to resolve intent",
+            "does not exist",
+            "not found",
+            "killed",
+            "segmentation fault",
+            "sigsegv",
+            "abort",
+        )
+    ):
+        return True
+
     # Non-error informational warnings from 'am start' when activity is already running/foregrounded
     if "brought to the front" in lower or "delivered to currently running" in lower:
         return False
-    if "warning: activity not started" in lower and "error:" not in lower:
-        return False
 
-    return (
-        "error:" in lower
-        or "error type" in lower
-        or "exception" in lower
-        or "unable to resolve intent" in lower
-        or "does not exist" in lower
-        or "not found" in lower
-        or "permission denial" in lower
-        or ("activity not started" in lower and "error" in lower)
-    )
+    # Unhandled 'activity not started' without benign foregrounding message
+    return "activity not started" in lower
+
+
+def _detect_hdmi_from_text(text: str, hdmi_input_ids: dict[str, str] | None = None) -> set[str]:
+    """Detect HDMI input candidates referenced in a text snippet."""
+    candidates: set[str] = set()
+    if hdmi_input_ids:
+        for label, full_id in hdmi_input_ids.items():
+            if full_id and full_id in text:
+                candidates.add(label)
+    if not candidates:
+        port_match = re.search(
+            r"\b(?:mHdmiPortId|hdmiPortId|portId|port_id|port)\s*[=:]\s*([12])\b",
+            text,
+            re.IGNORECASE,
+        )
+        if port_match:
+            candidates.add(INPUT_SOURCE_HDMI1 if port_match.group(1) == "1" else INPUT_SOURCE_HDMI2)
+
+    if not candidates:
+        lower = text.lower()
+        if "hw6" in lower or "hdmi2" in lower or "hdmi_2" in lower:
+            candidates.add(INPUT_SOURCE_HDMI2)
+        if "hw5" in lower or "hdmi1" in lower or "hdmi_1" in lower:
+            candidates.add(INPUT_SOURCE_HDMI1)
+
+    return candidates
 
 
 def parse_active_hdmi_input(text: str, hdmi_input_ids: dict[str, str] | None = None) -> str | None:
@@ -86,35 +142,41 @@ def parse_active_hdmi_input(text: str, hdmi_input_ids: dict[str, str] | None = N
     if not text:
         return None
 
-    # Priority 1: Match against known configured/discovered full HDMI input IDs on session lines
+    # Priority 1: Check explicit current-input lines (e.g. mCurId, currentInputId)
+    current_candidates: set[str] = set()
+    has_non_hdmi_current = False
+
     for line in text.splitlines():
         trimmed = line.strip()
-        if not trimmed:
+        if not trimmed or not CURRENT_INPUT_LINE_RE.search(trimmed):
             continue
-        if hdmi_input_ids:
-            for label, full_id in hdmi_input_ids.items():
-                if full_id and full_id in trimmed:
-                    return label
+        if re.search(r"\b(?:mCurId|currentInputId|mCurInputId)\s*[=:]\s*(?:null|none)\b", trimmed, re.IGNORECASE):
+            continue
+        cands = _detect_hdmi_from_text(trimmed, hdmi_input_ids)
+        if cands:
+            current_candidates.update(cands)
+        else:
+            # Current input is explicitly set to a non-null, non-HDMI source
+            has_non_hdmi_current = True
 
-    # Priority 2: Inspect session markers for HDMI port or hardware identifiers
+    if len(current_candidates) == 1 and not has_non_hdmi_current:
+        return next(iter(current_candidates))
+    if len(current_candidates) > 1 or has_non_hdmi_current:
+        return None
+
+    # Priority 2: Check active session lines (SessionState / mSession / mInputId)
+    session_candidates: set[str] = set()
     for line in text.splitlines():
         trimmed = line.strip()
-        if not trimmed:
+        if not trimmed or not ACTIVE_SESSION_LINE_RE.search(trimmed):
             continue
-        port_match = re.search(
-            r"\b(?:mHdmiPortId|hdmiPortId|portId|port_id|port)\s*[=:]\s*([12])\b",
-            trimmed,
-            re.IGNORECASE,
-        )
-        if port_match:
-            return INPUT_SOURCE_HDMI1 if port_match.group(1) == "1" else INPUT_SOURCE_HDMI2
+        cands = _detect_hdmi_from_text(trimmed, hdmi_input_ids)
+        session_candidates.update(cands)
 
-        lower = trimmed.lower()
-        if "hw6" in lower or "hdmi2" in lower or "hdmi_2" in lower:
-            return INPUT_SOURCE_HDMI2
-        if "hw5" in lower or "hdmi1" in lower or "hdmi_1" in lower:
-            return INPUT_SOURCE_HDMI1
+    if len(session_candidates) == 1:
+        return next(iter(session_candidates))
 
+    # Ambiguous data, conflicting sessions, or no active session -> unknown result (None)
     return None
 
 
@@ -467,6 +529,37 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                 return True
 
             deadline = time.monotonic() + wake_timeout
+
+            # Off request recently executed: wait for hardware to settle into standby before waking
+            if now < self._power_transition_until and self._optimistic_awake is False:
+                settled = False
+                settle_deadline = min(self._power_transition_until, deadline)
+                while time.monotonic() < settle_deadline:
+                    rem_settle = max(0.01, settle_deadline - time.monotonic())
+                    try:
+                        settle_state = await self._async_read_wakefulness(timeout=min(2.0, rem_settle))
+                        if settle_state is False:
+                            settled = True
+                            break
+                    except (AdbError, TimeoutError, OSError):
+                        settled = True
+                        break
+                    sleep_time = min(0.2, poll_interval, max(0.001, settle_deadline - time.monotonic()))
+                    await asyncio.sleep(sleep_time)
+
+                if not settled:
+                    if time.monotonic() >= deadline:
+                        _LOGGER.warning(
+                            "Timed out waiting for XGIMI projector %s to settle into standby before waking",
+                            self.host,
+                        )
+                        return False
+                    # 10s power transition window elapsed; device remained awake
+                    settled = True
+
+                self._optimistic_awake = None
+                self._power_transition_until = 0.0
+
             attempt = 0
 
             while True:
@@ -509,6 +602,22 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
             now = time.monotonic()
             if now < self._power_transition_until and self._optimistic_awake is False:
                 return True
+
+            # On request recently executed: wait for hardware to finish waking before turning off
+            if now < self._power_transition_until and self._optimistic_awake is True:
+                settle_deadline = min(self._power_transition_until, time.monotonic() + 10.0)
+                while time.monotonic() < settle_deadline:
+                    rem_settle = max(0.01, settle_deadline - time.monotonic())
+                    try:
+                        settle_state = await self._async_read_wakefulness(timeout=min(2.0, rem_settle))
+                        if settle_state is True:
+                            break
+                    except (AdbError, TimeoutError, OSError):
+                        pass
+                    sleep_time = min(0.2, max(0.001, settle_deadline - time.monotonic()))
+                    await asyncio.sleep(sleep_time)
+                self._optimistic_awake = None
+                self._power_transition_until = 0.0
 
             try:
                 awake = await self._async_read_wakefulness(timeout=4.0)

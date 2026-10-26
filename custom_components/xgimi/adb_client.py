@@ -446,11 +446,8 @@ class XgimiAdbClient:
         """Execute a bounded shell command over ADB, retrying once if safe and socket was stale."""
         should_retry = is_safe_to_retry_command(command) if retry is None else retry
         deadline = time.monotonic() + timeout
-        async with self._cmd_lock:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"Timed out waiting for ADB command lock for {command}")
-            async with asyncio.timeout(remaining):
+        async with asyncio.timeout(timeout):
+            async with self._cmd_lock:
                 had_existing_conn = self._writer is not None
                 try:
                     rem = max(0.01, deadline - time.monotonic())
