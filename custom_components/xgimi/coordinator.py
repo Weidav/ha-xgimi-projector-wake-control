@@ -49,11 +49,56 @@ POLL_SHELL_COMMAND = (
     "getprop sys.mtk.running.application; "
     "echo '---APP2---'; "
     "settings get global running_package_name; "
+    "echo '---HDMI---'; "
+    "dumpsys tv_input | grep -E 'mCurId|mSession|SessionState|currentInputId|inputId=|HW[56]|HDMI[12]'; "
     "echo '---META---'; "
     "getprop ro.product.model; "
     "getprop ro.build.version.release; "
     "cat /sys/class/net/wlan0/address 2>/dev/null"
 )
+
+
+def is_android_shell_error(output: str) -> bool:
+    """Check if Android shell output indicates an execution error."""
+    if not output:
+        return False
+    lower = output.lower()
+    return (
+        "error:" in lower
+        or "error type" in lower
+        or "exception" in lower
+        or "activity not started" in lower
+        or "unable to resolve intent" in lower
+        or "does not exist" in lower
+    )
+
+
+def parse_active_hdmi_input(text: str, hdmi_input_ids: dict[str, str] | None = None) -> str | None:
+    """Parse active HDMI input source from dumpsys tv_input session output."""
+    if not text:
+        return None
+
+    if hdmi_input_ids:
+        for label, full_id in hdmi_input_ids.items():
+            if full_id and full_id in text:
+                return label
+
+    for line in text.splitlines():
+        if any(marker in line for marker in ("mCurId", "currentInputId", "inputId", "SessionState", "sessionState")):
+            if "HW6" in line or "HDMI2" in line or "hdmi2" in line:
+                return INPUT_SOURCE_HDMI2
+            if "HW5" in line or "HDMI1" in line or "hdmi1" in line:
+                return INPUT_SOURCE_HDMI1
+            port_match = re.search(r"\b(?:mHdmiPortId|hdmiPortId|portId|port_id|port)\s*[=:]\s*([12])\b", line)
+            if port_match:
+                return INPUT_SOURCE_HDMI1 if port_match.group(1) == "1" else INPUT_SOURCE_HDMI2
+
+    if "HW6" in text or "HDMI2" in text or "hdmi2" in text:
+        return INPUT_SOURCE_HDMI2
+    if "HW5" in text or "HDMI1" in text or "hdmi1" in text:
+        return INPUT_SOURCE_HDMI1
+
+    return None
 
 # Minimal standard mDNS PTR query for _googlecast._tcp.local
 MDNS_CAST_QUERY = (
@@ -490,16 +535,20 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "am force-stop com.google.android.tv.inputplayer && "
                     "am start -a android.intent.action.MAIN -c android.intent.category.HOME"
                 )
-                await self.adb.async_shell(cmd, timeout=5.0)
+                res = await self.adb.async_shell(cmd, timeout=5.0)
             else:
                 await self._async_ensure_hdmi_inputs()
                 input_id = self._hdmi_input_ids.get(source, DEFAULT_HDMI_INPUT_IDS[source])
                 encoded_id = quote(input_id, safe="")
                 uri = f"content://android.media.tv/passthrough/{encoded_id}"
                 cmd = f'am start -a android.intent.action.VIEW -d "{uri}"'
-                await self.adb.async_shell(cmd, timeout=5.0)
+                res = await self.adb.async_shell(cmd, timeout=5.0)
         except (AdbError, TimeoutError, OSError) as err:
             _LOGGER.warning("Failed to switch input source to %s on %s: %s", source, self.host, err)
+            return False
+
+        if is_android_shell_error(res):
+            _LOGGER.warning("Android reported failure switching input source to %s on %s: %s", source, self.host, res)
             return False
 
         self._current_input_source = source
@@ -539,7 +588,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         for line in raw.splitlines():
             stripped = line.strip()
-            if stripped in ("---WAKE---", "---APP1---", "---APP2---", "---META---"):
+            if stripped in ("---WAKE---", "---APP1---", "---APP2---", "---HDMI---", "---META---"):
                 current_key = stripped.strip("-")
                 sections[current_key] = []
             else:
@@ -562,10 +611,15 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         app2 = next((x for x in sections.get("APP2", []) if x and x != "null"), None)
         running_app = app1 or app2
 
+        hdmi_text = "\n".join(sections.get("HDMI", []))
+        detected_hdmi = parse_active_hdmi_input(hdmi_text, self._hdmi_input_ids)
+
         if running_app and (
             "com.google.android.tv.inputplayer" in running_app or "com.mediatek.tvinput" in running_app
         ):
-            if self._current_input_source not in (INPUT_SOURCE_HDMI1, INPUT_SOURCE_HDMI2):
+            if detected_hdmi:
+                self._current_input_source = detected_hdmi
+            elif self._current_input_source not in (INPUT_SOURCE_HDMI1, INPUT_SOURCE_HDMI2):
                 self._current_input_source = INPUT_SOURCE_HDMI1
         elif running_app:
             self._current_input_source = INPUT_SOURCE_APPS

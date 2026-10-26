@@ -393,3 +393,60 @@ async def test_mac_discovery_then_user_changes_host_reloads() -> None:
     await async_reload_entry(hass, entry)
     hass.config_entries.async_reload.assert_called_once_with(entry.entry_id)
     await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_android_input_switch_failure_reported_as_error() -> None:
+    """Verify failed Android input switch outputs return False and do not change state."""
+    hass = _make_fake_hass()
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(return_value="Error: Activity not started, unable to resolve Intent")
+
+    coord = XgimiDataUpdateCoordinator(hass, "192.168.1.50", "XGIMI Horizon 20", adb_client=adb)
+    coord._current_input_source = INPUT_SOURCE_APPS
+
+    success = await coord.async_set_input_source(INPUT_SOURCE_HDMI2)
+    assert success is False
+    assert coord._current_input_source == INPUT_SOURCE_APPS
+    if coord.data:
+        assert coord.data["input_source"] == INPUT_SOURCE_APPS
+    await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_active_hdmi_detection_on_start_and_remote_change() -> None:
+    """Verify active HDMI 2 detected on start and when changed via remote."""
+    from custom_components.xgimi.coordinator import parse_active_hdmi_input
+
+    sample_hdmi2 = "SessionState: inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW6\n"
+    sample_hdmi1 = "SessionState: inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW5\n"
+    assert parse_active_hdmi_input(sample_hdmi2) == INPUT_SOURCE_HDMI2
+    assert parse_active_hdmi_input(sample_hdmi1) == INPUT_SOURCE_HDMI1
+    assert parse_active_hdmi_input("") is None
+
+    hass = _make_fake_hass()
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+
+    coord = XgimiDataUpdateCoordinator(hass, "192.168.1.50", "XGIMI Horizon 20", adb_client=adb)
+    poll_hdmi2 = (
+        "---WAKE---\nmWakefulness=Awake\n"
+        "---APP1---\ncom.google.android.tv.inputplayer\n"
+        "---HDMI---\nSessionState: inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW6\n"
+        "---META---\nXR14A\n14\n"
+    )
+    data = coord._parse_compound_poll(poll_hdmi2)
+    assert data["input_source"] == INPUT_SOURCE_HDMI2
+    assert coord._current_input_source == INPUT_SOURCE_HDMI2
+
+    poll_hdmi1 = (
+        "---WAKE---\nmWakefulness=Awake\n"
+        "---APP1---\ncom.google.android.tv.inputplayer\n"
+        "---HDMI---\nSessionState: inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW5\n"
+        "---META---\nXR14A\n14\n"
+    )
+    data1 = coord._parse_compound_poll(poll_hdmi1)
+    assert data1["input_source"] == INPUT_SOURCE_HDMI1
+    assert coord._current_input_source == INPUT_SOURCE_HDMI1
+    await coord.async_shutdown()
