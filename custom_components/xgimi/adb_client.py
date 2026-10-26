@@ -128,9 +128,7 @@ def is_safe_to_retry_command(command: str) -> bool:
     cmd = command.strip()
     if cmd.startswith("input "):
         return False
-    if "keyevent" in cmd:
-        return False
-    return True
+    return "keyevent" not in cmd
 
 
 class XgimiAdbClient:

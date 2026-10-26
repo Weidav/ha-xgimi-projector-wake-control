@@ -300,4 +300,3 @@ async def test_config_and_options_flow_on_declared_minimum_ha_version() -> None:
     assert res["data"][CONF_HOST] == "192.168.1.80"
     assert res["data"][CONF_MAC] == "aa:bb:cc:dd:ee:88"
     mock_uid.assert_awaited_once_with("aa:bb:cc:dd:ee:88")
-

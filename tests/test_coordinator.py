@@ -371,9 +371,7 @@ async def test_mac_discovery_then_user_changes_host_reloads() -> None:
     adb = MagicMock()
     adb.async_close = AsyncMock()
     adb.async_shell = AsyncMock(
-        return_value=(
-            "---WAKE---\nmWakefulness=Awake\n---META---\nXR14A\n14\naa:bb:cc:dd:ee:ff\n"
-        )
+        return_value=("---WAKE---\nmWakefulness=Awake\n---META---\nXR14A\n14\naa:bb:cc:dd:ee:ff\n")
     )
 
     coord = XgimiDataUpdateCoordinator(hass, "192.168.1.50", "XGIMI", config_entry=entry, adb_client=adb)

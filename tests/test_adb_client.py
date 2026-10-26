@@ -480,7 +480,7 @@ async def test_concurrent_key_initialization_shares_key(tmp_path: Path) -> None:
     client1 = XgimiAdbClient("127.0.0.1", key_path=key_path)
     client2 = XgimiAdbClient("127.0.0.1", key_path=key_path)
 
-    (priv1, pub1), (priv2, pub2) = await asyncio.gather(
+    (_, pub1), (_, pub2) = await asyncio.gather(
         client1.async_ensure_key(),
         client2.async_ensure_key(),
     )

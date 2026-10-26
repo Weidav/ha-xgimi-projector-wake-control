@@ -15,7 +15,6 @@ from homeassistant.core import HomeAssistant, callback
 
 from .adb_client import AdbError, XgimiAdbClient
 from .const import (
-    CAST_WAKE_PORT,
     CONF_ADB_PORT,
     CONF_HOST,
     CONF_MAC,
@@ -23,18 +22,11 @@ from .const import (
     DEFAULT_HOST,
     DEFAULT_NAME,
     DOMAIN,
-    REMOTE_WAKE_PORT,
-    WOL_DISCARD_PORT,
-    WOL_WAKE_PORT,
 )
 from .coordinator import (
     async_send_wowlan_burst,
-    create_magic_packet,
     format_mac,
     resolve_mac_from_arp,
-    send_mdns_knock,
-    send_tcp_knock,
-    send_udp_knock,
 )
 
 _LOGGER = logging.getLogger(__name__)

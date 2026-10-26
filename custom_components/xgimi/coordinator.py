@@ -100,6 +100,7 @@ def parse_active_hdmi_input(text: str, hdmi_input_ids: dict[str, str] | None = N
 
     return None
 
+
 # Minimal standard mDNS PTR query for _googlecast._tcp.local
 MDNS_CAST_QUERY = (
     b"\x00\x00"  # Transaction ID
@@ -242,7 +243,6 @@ async def async_send_wowlan_burst(
         send_tcp_knock(host, adb_port),
         return_exceptions=True,
     )
-
 
 
 def parse_wakefulness(output: str) -> bool | None:
@@ -392,7 +392,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
             new_data = {**self.config_entry.data, CONF_MAC: formatted}
             try:
                 self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
-            except Exception as err:
+            except (ValueError, RuntimeError) as err:
                 _LOGGER.debug("Failed to update config entry with discovered MAC: %s", err)
 
     async def _send_cast_http_knock(self) -> None:
