@@ -69,13 +69,13 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if coordinator is not None:
         effective_host = entry.options.get(CONF_HOST) or entry.data.get(CONF_HOST, DEFAULT_HOST)
         effective_port = entry.options.get(CONF_ADB_PORT) or entry.data.get(CONF_ADB_PORT, DEFAULT_ADB_PORT)
-        user_mac = format_mac(entry.options.get(CONF_MAC))
+        effective_mac = format_mac(entry.options.get(CONF_MAC) or entry.data.get(CONF_MAC))
 
         # Only reload if effective connection settings have changed from the active coordinator
         if (
             effective_host == coordinator.host
             and effective_port == coordinator.adb_port
-            and (user_mac is None or user_mac == coordinator.mac)
+            and effective_mac == coordinator.mac
         ):
             return
 

@@ -98,6 +98,7 @@ async def test_entry_setup_standby_fallback_and_unload() -> None:
     fake_coord = _make_mock_coordinator()
     fake_coord.async_config_entry_first_refresh = AsyncMock(side_effect=ConfigEntryNotReady("standby"))
     fake_coord.default_state.return_value = {"online": False, "awake": False}
+    fake_coord.mac = None
 
     with patch(
         "custom_components.xgimi.XgimiDataUpdateCoordinator",

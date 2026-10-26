@@ -392,6 +392,14 @@ async def test_mac_discovery_then_user_changes_host_reloads() -> None:
     entry.options = {"host": "192.168.1.60"}
     await async_reload_entry(hass, entry)
     hass.config_entries.async_reload.assert_called_once_with(entry.entry_id)
+
+    # When user clears MAC address in options flow -> MUST reload!
+    hass.config_entries.async_reload.reset_mock()
+    entry.options = {"host": "192.168.1.50"}
+    entry.data = {"host": "192.168.1.50"}
+    await async_reload_entry(hass, entry)
+    hass.config_entries.async_reload.assert_called_once_with(entry.entry_id)
+
     await coord.async_shutdown()
 
 
