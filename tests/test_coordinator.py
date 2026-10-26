@@ -143,8 +143,8 @@ async def test_multi_vector_wowlan_knocks() -> None:
         tcp_calls.append((host, port))
 
     with (
-        patch("custom_components.xgimi.coordinator._send_udp_knock", side_effect=_record_udp),
-        patch("custom_components.xgimi.coordinator._send_tcp_knock", side_effect=_record_tcp),
+        patch("custom_components.xgimi.coordinator.send_udp_knock", side_effect=_record_udp),
+        patch("custom_components.xgimi.coordinator.send_tcp_knock", side_effect=_record_tcp),
         patch.object(coord, "_send_cast_http_knock", AsyncMock()) as mock_http,
     ):
         await coord._send_wowlan_knocks()

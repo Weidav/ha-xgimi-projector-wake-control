@@ -499,8 +499,6 @@ class XgimiAdbClient:
             with contextlib.suppress(OSError, RuntimeError):
                 writer.close()
 
-    _close_transport_nowait = close_transport_nowait
-
     async def _close_transport_locked(self) -> None:
         """Close the cached transport (caller holds _cmd_lock)."""
         writer = self._writer

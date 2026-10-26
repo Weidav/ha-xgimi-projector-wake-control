@@ -78,7 +78,6 @@ def _make_mock_coordinator() -> MagicMock:
     coord.async_shutdown = AsyncMock()
     coord.adb_port = 5555
     coord.default_state = MagicMock(return_value={"online": False, "awake": False})
-    coord._default_state = coord.default_state
     return coord
 
 
@@ -98,7 +97,7 @@ async def test_entry_setup_standby_fallback_and_unload() -> None:
 
     fake_coord = _make_mock_coordinator()
     fake_coord.async_config_entry_first_refresh = AsyncMock(side_effect=ConfigEntryNotReady("standby"))
-    fake_coord._default_state.return_value = {"online": False, "awake": False}
+    fake_coord.default_state.return_value = {"online": False, "awake": False}
 
     with patch(
         "custom_components.xgimi.XgimiDataUpdateCoordinator",

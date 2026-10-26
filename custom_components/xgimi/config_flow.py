@@ -28,6 +28,7 @@ from .const import (
     WOL_WAKE_PORT,
 )
 from .coordinator import (
+    async_send_wowlan_burst,
     create_magic_packet,
     format_mac,
     resolve_mac_from_arp,
@@ -49,22 +50,7 @@ def _validate_host(host: str) -> bool:
 
 async def _send_setup_wowlan_knocks(hass: HomeAssistant, host: str, mac: str | None) -> None:
     """Send Stage-1 WoWLAN wake burst if projector is asleep during config flow setup."""
-    magic_payload = create_magic_packet(mac) or (b"\xff" * 102)
-
-    def _sync_udp() -> None:
-        send_udp_knock(host, WOL_WAKE_PORT, payload=magic_payload, repeat=3)
-        send_udp_knock(host, WOL_DISCARD_PORT, payload=magic_payload, repeat=2)
-        send_udp_knock(host, CAST_WAKE_PORT, payload=magic_payload, repeat=2)
-        send_udp_knock(host, REMOTE_WAKE_PORT, payload=magic_payload, repeat=2)
-        send_mdns_knock(host)
-
-    await hass.async_add_executor_job(_sync_udp)
-    await asyncio.gather(
-        send_tcp_knock(host, CAST_WAKE_PORT),
-        send_tcp_knock(host, REMOTE_WAKE_PORT),
-        send_tcp_knock(host, DEFAULT_ADB_PORT),
-        return_exceptions=True,
-    )
+    await async_send_wowlan_burst(hass, host, mac, DEFAULT_ADB_PORT)
 
 
 async def _try_read_adb_mac(adb: XgimiAdbClient) -> str | None:
@@ -104,8 +90,8 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
     ) -> XgimiOptionsFlowHandler:
-        """Get the options flow for this handler (modern zero-arg constructor)."""
-        return XgimiOptionsFlowHandler()
+        """Get the options flow for this handler."""
+        return XgimiOptionsFlowHandler(config_entry)
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle Step 1: Host IP, Name, optional MAC, and initial ADB probe."""
@@ -195,16 +181,26 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         authorized = False
         if self._auth_task is not None:
             if self._auth_task.done():
-                with contextlib.suppress(Exception):
+                try:
                     authorized = bool(self._auth_task.result())
+                except (AdbError, TimeoutError, OSError) as err:
+                    _LOGGER.debug("ADB authorization background task failed: %s", err)
+                except asyncio.CancelledError:
+                    pass
             else:
                 # Wait up to 5s for the in-flight authorization prompt or cancel and verify
-                with contextlib.suppress(TimeoutError, Exception):
+                try:
                     authorized = await asyncio.wait_for(asyncio.shield(self._auth_task), timeout=5.0)
+                except TimeoutError:
+                    pass
+                except (AdbError, OSError) as err:
+                    _LOGGER.debug("ADB authorization task error: %s", err)
                 if not self._auth_task.done():
                     self._auth_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                    try:
                         await self._auth_task
+                    except (asyncio.CancelledError, AdbError, TimeoutError, OSError):
+                        pass
             self._auth_task = None
 
         if not authorized:
@@ -244,7 +240,20 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class XgimiOptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for XGIMI Projector Wake & Control using HA's modern zero-arg pattern."""
+    """Handle options flow for XGIMI Projector Wake & Control."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry | None = None) -> None:
+        """Initialize the options flow."""
+        super().__init__()
+        if config_entry is not None:
+            self._config_entry = config_entry
+
+    @property
+    def config_entry(self) -> config_entries.ConfigEntry:
+        """Return the config entry for compatibility across HA versions."""
+        if hasattr(self, "_config_entry"):
+            return self._config_entry
+        return super().config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Manage the XGIMI Projector options (host & MAC address)."""

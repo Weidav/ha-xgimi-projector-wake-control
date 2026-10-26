@@ -201,7 +201,6 @@ async def test_config_flow_wake_on_unreachable_and_interactive_authorize() -> No
     aborted_flow.hass = _make_flow_hass()
     hang_adb = MagicMock()
     hang_adb.close_transport_nowait = MagicMock()
-    hang_adb._close_transport_nowait = hang_adb.close_transport_nowait
 
     async def _slow_auth(timeout: float = 30.0) -> bool:
         await asyncio.sleep(timeout)
@@ -219,7 +218,7 @@ async def test_config_flow_wake_on_unreachable_and_interactive_authorize() -> No
     await asyncio.sleep(0)
     assert auth_task.cancelled()
     assert aborted_flow._auth_task is None
-    hang_adb._close_transport_nowait.assert_called_once()
+    hang_adb.close_transport_nowait.assert_called_once()
 
 
 def test_manifest_hacs_and_translations_validity() -> None:
@@ -241,6 +240,7 @@ def test_manifest_hacs_and_translations_validity() -> None:
 
     hacs = json.loads((root / "hacs.json").read_text(encoding="utf-8"))
     assert hacs["name"] == "XGIMI Projector Wake & Control"
+    assert hacs["homeassistant"] == "2024.12.0"
     assert hacs["render_readme"] is True
 
     strings = json.loads((root / "custom_components" / "xgimi" / "strings.json").read_text(encoding="utf-8"))
@@ -248,3 +248,56 @@ def test_manifest_hacs_and_translations_validity() -> None:
         (root / "custom_components" / "xgimi" / "translations" / "en.json").read_text(encoding="utf-8")
     )
     assert strings == en_trans
+
+
+@pytest.mark.asyncio
+async def test_config_and_options_flow_on_declared_minimum_ha_version() -> None:
+    """Verify config and options flow compatibility on declared minimum HA version (2024.12.0)."""
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    hacs = json.loads((root / "hacs.json").read_text(encoding="utf-8"))
+    assert hacs["homeassistant"] == "2024.12.0"
+
+    fake_hass = _make_flow_hass()
+    fake_entry = MagicMock()
+    fake_entry.entry_id = "test_min_ha"
+    fake_entry.data = {CONF_HOST: "192.168.1.75", CONF_NAME: "Min HA Projector"}
+    fake_entry.options = {}
+
+    flow = XgimiConfigFlow()
+    flow.hass = fake_hass
+    options_flow = XgimiConfigFlow.async_get_options_flow(fake_entry)
+    options_flow.hass = fake_hass
+
+    assert options_flow.config_entry is fake_entry
+
+    form = await options_flow.async_step_init(None)
+    assert form["type"] == "form"
+    assert form["step_id"] == "init"
+
+    result = await options_flow.async_step_init({CONF_HOST: "192.168.1.80", CONF_MAC: "AA:BB:CC:DD:EE:88"})
+    assert result["type"] == "create_entry"
+    assert result["data"] == {CONF_HOST: "192.168.1.80", CONF_MAC: "aa:bb:cc:dd:ee:88"}
+    fake_hass.config_entries.async_update_entry.assert_called_once()
+
+    fake_adb = MagicMock()
+    fake_adb.async_probe_status = AsyncMock(return_value="authorized")
+    fake_adb.async_shell = AsyncMock(return_value="AA:BB:CC:DD:EE:88\n")
+    fake_adb.async_close = AsyncMock()
+
+    with (
+        patch("custom_components.xgimi.config_flow.XgimiAdbClient", return_value=fake_adb),
+        patch("custom_components.xgimi.config_flow.resolve_mac_from_arp", return_value=None),
+        patch.object(flow, "async_set_unique_id", AsyncMock()) as mock_uid,
+        patch.object(flow, "_abort_if_unique_id_configured", MagicMock()),
+    ):
+        res = await flow.async_step_user({CONF_HOST: "192.168.1.80", CONF_NAME: "Min HA Projector", CONF_MAC: ""})
+
+    assert res["type"] == "create_entry"
+    assert res["title"] == "Min HA Projector"
+    assert res["data"][CONF_HOST] == "192.168.1.80"
+    assert res["data"][CONF_MAC] == "aa:bb:cc:dd:ee:88"
+    mock_uid.assert_awaited_once_with("aa:bb:cc:dd:ee:88")
+

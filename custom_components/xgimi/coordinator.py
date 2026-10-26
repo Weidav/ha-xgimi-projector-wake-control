@@ -10,7 +10,7 @@ import socket
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import quote
 
 import aiohttp
@@ -162,7 +162,7 @@ def resolve_mac_from_arp(host: str) -> str | None:
     return None
 
 
-def _send_udp_knock(host: str, port: int, payload: bytes = b"\x00", repeat: int = 2) -> None:
+def send_udp_knock(host: str, port: int, payload: bytes = b"\x00", repeat: int = 2) -> None:
     """Send best-effort UDP wake knock datagrams (unicast + IPv4 broadcast)."""
     clean_host = host.strip("[]")
     is_ipv6 = ":" in clean_host
@@ -192,7 +192,7 @@ def _send_udp_knock(host: str, port: int, payload: bytes = b"\x00", repeat: int 
                 b_sock.sendto(payload, ("255.255.255.255", port))
 
 
-def _send_mdns_knock(host: str) -> None:
+def send_mdns_knock(host: str) -> None:
     """Send mDNS multicast and broadcast queries to wake Android TV Cast WoWLAN."""
     clean_host = host.strip("[]")
     with (
@@ -203,10 +203,10 @@ def _send_mdns_knock(host: str) -> None:
         m_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
         m_sock.sendto(MDNS_CAST_QUERY, ("224.0.0.251", MDNS_WAKE_PORT))
 
-    _send_udp_knock(clean_host, MDNS_WAKE_PORT, payload=MDNS_CAST_QUERY, repeat=1)
+    send_udp_knock(clean_host, MDNS_WAKE_PORT, payload=MDNS_CAST_QUERY, repeat=1)
 
 
-async def _send_tcp_knock(host: str, port: int, timeout: float = 0.8) -> None:
+async def send_tcp_knock(host: str, port: int, timeout: float = 0.8) -> None:
     """Send a quick TCP SYN connection attempt to trigger MediaTek WoWLAN."""
     clean_host = host.strip("[]")
     with contextlib.suppress(TimeoutError, OSError):
@@ -219,9 +219,30 @@ async def _send_tcp_knock(host: str, port: int, timeout: float = 0.8) -> None:
             await asyncio.wait_for(writer.wait_closed(), timeout=0.5)
 
 
-send_udp_knock = _send_udp_knock
-send_mdns_knock = _send_mdns_knock
-send_tcp_knock = _send_tcp_knock
+async def async_send_wowlan_burst(
+    hass: HomeAssistant,
+    host: str,
+    mac: str | None,
+    adb_port: int = DEFAULT_ADB_PORT,
+) -> None:
+    """Send Stage-1 WoWLAN wake burst (UDP and TCP knocks)."""
+    magic_payload = create_magic_packet(mac) or (b"\xff" * 102)
+
+    def _sync_udp() -> None:
+        send_udp_knock(host, WOL_WAKE_PORT, payload=magic_payload, repeat=3)
+        send_udp_knock(host, WOL_DISCARD_PORT, payload=magic_payload, repeat=2)
+        send_udp_knock(host, CAST_WAKE_PORT, payload=magic_payload, repeat=2)
+        send_udp_knock(host, REMOTE_WAKE_PORT, payload=magic_payload, repeat=2)
+        send_mdns_knock(host)
+
+    await hass.async_add_executor_job(_sync_udp)
+    await asyncio.gather(
+        send_tcp_knock(host, CAST_WAKE_PORT),
+        send_tcp_knock(host, REMOTE_WAKE_PORT),
+        send_tcp_knock(host, adb_port),
+        return_exceptions=True,
+    )
+
 
 
 def parse_wakefulness(output: str) -> bool | None:
@@ -289,7 +310,19 @@ def parse_hdmi_inputs_from_dumpsys(dumpsys_output: str) -> dict[str, str]:
     return discovered
 
 
-class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+class XgimiCoordinatorData(TypedDict):
+    """Structured state dictionary for XGIMI Projector."""
+
+    online: bool
+    awake: bool | None
+    input_source: str
+    running_app: str | None
+    model: str
+    sw_version: str
+    mac: str | None
+
+
+class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
     """Coordinator managing two-stage WoWLAN wake, ADB state polling, and command dispatch."""
 
     def __init__(
@@ -337,7 +370,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._sw_version: str = "14"
         self._delayed_refresh_tasks: set[asyncio.Task[Any]] = set()
 
-    def default_state(self, *, online: bool = False, awake: bool | None = False) -> dict[str, Any]:
+    def default_state(self, *, online: bool = False, awake: bool | None = False) -> XgimiCoordinatorData:
         """Return a structured state dictionary."""
         return {
             "online": online,
@@ -349,8 +382,6 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "mac": self.mac,
         }
 
-    _default_state = default_state
-
     def _persist_discovered_mac(self, mac: str) -> None:
         """Persist auto-discovered MAC address into the ConfigEntry if not yet saved."""
         formatted = format_mac(mac)
@@ -359,8 +390,10 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.mac = formatted
         if self.config_entry is not None and not self.config_entry.data.get(CONF_MAC):
             new_data = {**self.config_entry.data, CONF_MAC: formatted}
-            with contextlib.suppress(Exception):
+            try:
                 self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+            except Exception as err:
+                _LOGGER.debug("Failed to update config entry with discovered MAC: %s", err)
 
     async def _send_cast_http_knock(self) -> None:
         """Send best-effort HTTP GET knock to Google Cast port 8010."""
@@ -377,21 +410,9 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if arp_mac:
                 self._persist_discovered_mac(arp_mac)
 
-        magic_payload = create_magic_packet(self.mac) or (b"\xff" * 102)
-
-        def _sync_udp_burst() -> None:
-            _send_udp_knock(self.host, WOL_WAKE_PORT, payload=magic_payload, repeat=3)
-            _send_udp_knock(self.host, WOL_DISCARD_PORT, payload=magic_payload, repeat=2)
-            _send_udp_knock(self.host, CAST_WAKE_PORT, payload=magic_payload, repeat=2)
-            _send_udp_knock(self.host, REMOTE_WAKE_PORT, payload=magic_payload, repeat=2)
-            _send_mdns_knock(self.host)
-
-        await self.hass.async_add_executor_job(_sync_udp_burst)
         await asyncio.gather(
             self._send_cast_http_knock(),
-            _send_tcp_knock(self.host, CAST_WAKE_PORT),
-            _send_tcp_knock(self.host, REMOTE_WAKE_PORT),
-            _send_tcp_knock(self.host, self.adb_port),
+            async_send_wowlan_burst(self.hass, self.host, self.mac, self.adb_port),
             return_exceptions=True,
         )
 
@@ -507,9 +528,12 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Set optimistic state during a 10s hardware transition window and schedule refreshes."""
         self._optimistic_awake = awake
         self._power_transition_until = time.monotonic() + 10.0
-        current = dict(self.data) if self.data else self._default_state(online=True, awake=awake)
-        current["online"] = True
-        current["awake"] = awake
+        base = self.data if self.data else self.default_state(online=True, awake=awake)
+        current: XgimiCoordinatorData = {
+            **base,
+            "online": True,
+            "awake": awake,
+        }
         self.async_set_updated_data(current)
         self._schedule_delayed_refreshes()
 
@@ -552,8 +576,11 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
 
         self._current_input_source = source
-        current = dict(self.data) if self.data else self._default_state(online=True, awake=True)
-        current["input_source"] = source
+        base = self.data if self.data else self.default_state(online=True, awake=True)
+        current: XgimiCoordinatorData = {
+            **base,
+            "input_source": source,
+        }
         self.async_set_updated_data(current)
         self._schedule_delayed_refreshes(delays=(2.0,))
         return True
@@ -576,11 +603,11 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
 
         await self.adb.async_close()
-        state = self._default_state(online=False, awake=False)
+        state = self.default_state(online=False, awake=False)
         self.async_set_updated_data(state)
         return True
 
-    def _parse_compound_poll(self, raw: str) -> dict[str, Any]:
+    def _parse_compound_poll(self, raw: str) -> XgimiCoordinatorData:
         """Parse the single-command compound ADB poll response."""
         sections: dict[str, list[str]] = {}
         current_key = "HEADER"
@@ -646,7 +673,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "mac": self.mac,
         }
 
-    async def _async_update_data(self) -> dict[str, Any]:
+    async def _async_update_data(self) -> XgimiCoordinatorData:
         """Poll projector state via a single compound ADB shell command."""
         if not self.mac:
             arp_mac = await self.hass.async_add_executor_job(resolve_mac_from_arp, self.host)
@@ -660,8 +687,8 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Projector %s offline or in deep sleep: %s", self.host, err)
             now = time.monotonic()
             if now < self._power_transition_until and self._optimistic_awake is True:
-                return self._default_state(online=True, awake=True)
-            return self._default_state(online=False, awake=False)
+                return self.default_state(online=True, awake=True)
+            return self.default_state(online=False, awake=False)
 
     async def async_shutdown(self) -> None:
         """Cancel delayed refresh tasks and close ADB connection on unload."""
