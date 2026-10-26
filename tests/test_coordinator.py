@@ -829,3 +829,106 @@ async def test_power_off_then_on_sustained_deep_sleep_disconnect() -> None:
         assert coord.data["awake"] is True
     finally:
         await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_power_off_then_on_interleaved_transient_errors_settling() -> None:
+    """Verify interleaved transient errors reset error counter and wait for confirmed standby."""
+    awake = True
+    off_requested = False
+    call_count = 0
+    keys: list[int] = []
+    tasks: list[asyncio.Task[None]] = []
+
+    async def delayed_off() -> None:
+        nonlocal awake
+        await asyncio.sleep(0.08)
+        awake = False
+
+    async def shell(command: str, **kwargs: object) -> str:
+        nonlocal call_count
+        call_count += 1
+        # Interleave transient errors: fail on call 1 and 3 while off_requested
+        if off_requested and call_count in (1, 3):
+            raise AdbError("Interleaved transient error")
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake, off_requested
+        keys.append(keycode)
+        if keycode == KEYCODE_POWER:
+            off_requested = True
+            tasks.append(asyncio.create_task(delayed_off()))
+        elif keycode == KEYCODE_WAKEUP:
+            awake = True
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            results = await asyncio.gather(
+                coord.async_turn_off(),
+                coord.async_turn_on(wake_timeout=1.0, poll_interval=0.01),
+            )
+        await asyncio.gather(*tasks)
+        assert results == [True, True]
+        assert awake is True
+        assert coord.data["awake"] is True
+        assert KEYCODE_WAKEUP in keys
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_power_off_then_on_transient_error_in_wake_loop() -> None:
+    """Verify a transient error during Stage-2 wake poll retries properly and sends wake keys."""
+    awake = True
+    off_requested = False
+    keys: list[int] = []
+    tasks: list[asyncio.Task[None]] = []
+    wake_error_injected = False
+
+    async def delayed_off() -> None:
+        nonlocal awake
+        await asyncio.sleep(0.05)
+        awake = False
+
+    async def shell(command: str, **kwargs: object) -> str:
+        nonlocal wake_error_injected
+        # Once standby is reached (awake is False), inject a transient error in the wake loop
+        if not awake and not wake_error_injected:
+            wake_error_injected = True
+            raise AdbError("Transient error during Stage-2 wake poll")
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake, off_requested
+        keys.append(keycode)
+        if keycode == KEYCODE_POWER:
+            off_requested = True
+            tasks.append(asyncio.create_task(delayed_off()))
+        elif keycode == KEYCODE_WAKEUP:
+            awake = True
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            results = await asyncio.gather(
+                coord.async_turn_off(),
+                coord.async_turn_on(wake_timeout=1.0, poll_interval=0.01),
+            )
+        await asyncio.gather(*tasks)
+        assert results == [True, True]
+        assert awake is True
+        assert coord.data["awake"] is True
+        assert KEYCODE_WAKEUP in keys
+        assert wake_error_injected is True
+    finally:
+        await coord.async_shutdown()

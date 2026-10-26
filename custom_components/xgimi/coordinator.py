@@ -533,6 +533,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
             # Off request recently executed: wait for hardware to settle into standby before waking
             shutdown_pending = now < self._power_transition_until and self._optimistic_awake is False
             settled_to_standby = False
+            settled_deep_sleep = False
             settle_deadline = min(self._power_transition_until, deadline)
 
             if shutdown_pending:
@@ -558,6 +559,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                         if consecutive_errors >= 3:
                             # Sustained connection loss indicates the device entered deep sleep
                             settled = True
+                            settled_deep_sleep = True
                             break
                     sleep_time = min(0.2, poll_interval, max(0.001, settle_deadline - time.monotonic()))
                     await asyncio.sleep(sleep_time)
@@ -576,7 +578,6 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                 self._power_transition_until = 0.0
 
             attempt = 0
-            offline_observed = False
 
             while True:
                 if attempt % 2 == 0:
@@ -586,7 +587,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                 try:
                     awake = await self._async_read_wakefulness(timeout=2.5)
                     if awake is True:
-                        if shutdown_pending and not settled_to_standby and not offline_observed:
+                        if shutdown_pending and not settled_to_standby and not settled_deep_sleep:
                             # Pre-off Awake: hardware is still finishing shutdown.
                             # Continue waiting for hardware to reach standby or settle deadline.
                             now = time.monotonic()
@@ -606,7 +607,6 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                     self._mark_power_transition(awake=True)
                     return True
                 except (AdbError, TimeoutError, OSError) as err:
-                    offline_observed = True
                     _LOGGER.debug(
                         "Stage-2 ADB wake poll attempt %d for %s pending: %s",
                         attempt,
