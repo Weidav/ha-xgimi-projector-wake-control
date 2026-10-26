@@ -39,8 +39,8 @@ class XgimiInputSourceSelect(XgimiEntity, SelectEntity):  # pyright: ignore[repo
         """Return the currently active input source."""
         if not self.coordinator.data:
             return INPUT_SOURCE_APPS
-        current = self.coordinator.data.get("input_source", INPUT_SOURCE_APPS)
-        return current if current in INPUT_SOURCES else INPUT_SOURCE_APPS
+        current = self.coordinator.data.get("input_source")
+        return current if current in INPUT_SOURCES else None
 
     async def async_select_option(self, option: str) -> None:
         """Switch projector input source via ADB intent."""

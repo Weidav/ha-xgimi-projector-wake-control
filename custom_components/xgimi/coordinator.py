@@ -50,7 +50,7 @@ POLL_SHELL_COMMAND = (
     "echo '---APP2---'; "
     "settings get global running_package_name; "
     "echo '---HDMI---'; "
-    "dumpsys tv_input | grep -E 'mCurId|mSession|SessionState|currentInputId|inputId=|HW[56]|HDMI[12]'; "
+    "dumpsys tv_input | grep -iE 'mCurId|currentInputId|sessionState|mSession|mInputId'; "
     "echo '---META---'; "
     "getprop ro.product.model; "
     "getprop ro.build.version.release; "
@@ -78,25 +78,34 @@ def parse_active_hdmi_input(text: str, hdmi_input_ids: dict[str, str] | None = N
     if not text:
         return None
 
-    if hdmi_input_ids:
-        for label, full_id in hdmi_input_ids.items():
-            if full_id and full_id in text:
-                return label
-
+    # Priority 1: Match against known configured/discovered full HDMI input IDs on session lines
     for line in text.splitlines():
-        if any(marker in line for marker in ("mCurId", "currentInputId", "inputId", "SessionState", "sessionState")):
-            if "HW6" in line or "HDMI2" in line or "hdmi2" in line:
-                return INPUT_SOURCE_HDMI2
-            if "HW5" in line or "HDMI1" in line or "hdmi1" in line:
-                return INPUT_SOURCE_HDMI1
-            port_match = re.search(r"\b(?:mHdmiPortId|hdmiPortId|portId|port_id|port)\s*[=:]\s*([12])\b", line)
-            if port_match:
-                return INPUT_SOURCE_HDMI1 if port_match.group(1) == "1" else INPUT_SOURCE_HDMI2
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+        if hdmi_input_ids:
+            for label, full_id in hdmi_input_ids.items():
+                if full_id and full_id in trimmed:
+                    return label
 
-    if "HW6" in text or "HDMI2" in text or "hdmi2" in text:
-        return INPUT_SOURCE_HDMI2
-    if "HW5" in text or "HDMI1" in text or "hdmi1" in text:
-        return INPUT_SOURCE_HDMI1
+    # Priority 2: Inspect session markers for HDMI port or hardware identifiers
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+        port_match = re.search(
+            r"\b(?:mHdmiPortId|hdmiPortId|portId|port_id|port)\s*[=:]\s*([12])\b",
+            trimmed,
+            re.IGNORECASE,
+        )
+        if port_match:
+            return INPUT_SOURCE_HDMI1 if port_match.group(1) == "1" else INPUT_SOURCE_HDMI2
+
+        lower = trimmed.lower()
+        if "hw6" in lower or "hdmi2" in lower or "hdmi_2" in lower:
+            return INPUT_SOURCE_HDMI2
+        if "hw5" in lower or "hdmi1" in lower or "hdmi_1" in lower:
+            return INPUT_SOURCE_HDMI1
 
     return None
 
@@ -315,7 +324,7 @@ class XgimiCoordinatorData(TypedDict):
 
     online: bool
     awake: bool | None
-    input_source: str
+    input_source: str | None
     running_app: str | None
     model: str
     sw_version: str
@@ -363,7 +372,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
         self._power_lock = asyncio.Lock()
         self._power_transition_until: float = 0.0
         self._optimistic_awake: bool | None = None
-        self._current_input_source: str = INPUT_SOURCE_APPS
+        self._current_input_source: str | None = INPUT_SOURCE_APPS
         self._hdmi_input_ids: dict[str, str] = dict(DEFAULT_HDMI_INPUT_IDS)
         self._hdmi_discovered: bool = False
         self._model: str = name
@@ -644,12 +653,11 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
         if running_app and (
             "com.google.android.tv.inputplayer" in running_app or "com.mediatek.tvinput" in running_app
         ):
-            if detected_hdmi:
-                self._current_input_source = detected_hdmi
-            elif self._current_input_source not in (INPUT_SOURCE_HDMI1, INPUT_SOURCE_HDMI2):
-                self._current_input_source = INPUT_SOURCE_HDMI1
+            self._current_input_source = detected_hdmi
         elif running_app:
             self._current_input_source = INPUT_SOURCE_APPS
+        elif detected_hdmi:
+            self._current_input_source = detected_hdmi
 
         raw_meta = sections.get("META", [])
         if len(raw_meta) >= 1 and raw_meta[0] and not format_mac(raw_meta[0]):

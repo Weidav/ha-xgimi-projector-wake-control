@@ -228,6 +228,8 @@ async def test_compound_poll_and_mac_persistence_and_commands() -> None:
             "com.google.android.tv.inputplayer\n"
             "---APP2---\n"
             "null\n"
+            "---HDMI---\n"
+            "SessionState: inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW5\n"
             "---META---\n"
             "XR14A\n"
             "14\n"
@@ -447,4 +449,23 @@ async def test_active_hdmi_detection_on_start_and_remote_change() -> None:
     data1 = coord._parse_compound_poll(poll_hdmi1)
     assert data1["input_source"] == INPUT_SOURCE_HDMI1
     assert coord._current_input_source == INPUT_SOURCE_HDMI1
+
+    # When multiple lines exist (including both HW5 and HW6), active session line wins
+    multi_line = (
+        "mCurId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW6\n"
+        "SessionState: inputId=com.mediatek.tvinput/.hdmi.HDMIInputService/HW6\n"
+    )
+    assert parse_active_hdmi_input(multi_line) == INPUT_SOURCE_HDMI2
+
+    # When inputplayer is running but HDMI session cannot be reliably detected -> None (unknown)
+    poll_unknown_hdmi = (
+        "---WAKE---\nmWakefulness=Awake\n"
+        "---APP1---\ncom.google.android.tv.inputplayer\n"
+        "---HDMI---\n"
+        "---META---\nXR14A\n14\n"
+    )
+    data_unknown = coord._parse_compound_poll(poll_unknown_hdmi)
+    assert data_unknown["input_source"] is None
+    assert coord._current_input_source is None
+
     await coord.async_shutdown()
