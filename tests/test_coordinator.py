@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
@@ -930,5 +931,121 @@ async def test_power_off_then_on_transient_error_in_wake_loop() -> None:
         assert coord.data["awake"] is True
         assert KEYCODE_WAKEUP in keys
         assert wake_error_injected is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_power_off_then_immediately_on_three_temporary_errors_reproduction() -> None:
+    """Reproduce Finding #2: 3 temporary connection errors during shutdown settling.
+
+    Scenario:
+    - Off -> immediately on, with three temporary connection failures.
+    - Simulated projector finishes shutting down at 0.80 seconds.
+    - Coordinator must NOT return success at 0.40s without sending a wake key.
+    - Coordinator must wait for standby and send KEYCODE_WAKEUP.
+    - Simulated projector and Home Assistant coordinator both end awake is True.
+    """
+    awake = True
+    injected_errors = 0
+    keys: list[int] = []
+    shutdown_task: asyncio.Task[None] | None = None
+
+    async def delayed_off() -> None:
+        nonlocal awake
+        await asyncio.sleep(0.80)
+        awake = False
+
+    async def shell(command: str, **kwargs: object) -> str:
+        nonlocal injected_errors
+        # Inject 3 temporary connection failures after shutdown begins while device is shutting down
+        if shutdown_task is not None and injected_errors < 3:
+            injected_errors += 1
+            raise AdbConnectionError("Temporary connection failure")
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake, shutdown_task
+        keys.append(keycode)
+        if keycode == KEYCODE_POWER:
+            shutdown_task = asyncio.create_task(delayed_off())
+        elif keycode == KEYCODE_WAKEUP:
+            awake = True
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            assert await coord.async_turn_off() is True
+            turn_on_start = time.monotonic()
+            assert await coord.async_turn_on(wake_timeout=5.0) is True
+            elapsed = time.monotonic() - turn_on_start
+
+        if shutdown_task:
+            await shutdown_task
+
+        assert injected_errors == 3
+        # Must not have exited early at 0.40s; must have waited for shutdown to settle at ~0.80s
+        assert elapsed >= 0.75
+        # Wake key must have been sent
+        assert KEYCODE_WAKEUP in keys
+        # Both simulated projector and Home Assistant coordinator end awake is True
+        assert awake is True
+        assert coord.data["awake"] is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [AdbError, TimeoutError, OSError, AdbConnectionError])
+async def test_competing_power_off_followed_by_on_three_transient_errors(error_type: type[Exception]) -> None:
+    """Verify 3 transient ADB errors of various types preserve pending shutdown and send wake key."""
+    awake = True
+    off_requested = False
+    injected_errors = 0
+    keys: list[int] = []
+    tasks: list[asyncio.Task[None]] = []
+
+    async def delayed_off() -> None:
+        nonlocal awake
+        await asyncio.sleep(0.08)
+        awake = False
+
+    async def shell(command: str, **kwargs: object) -> str:
+        nonlocal injected_errors
+        if off_requested and injected_errors < 3:
+            injected_errors += 1
+            raise error_type("Temporary connection failure")
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake, off_requested
+        keys.append(keycode)
+        if keycode == KEYCODE_POWER:
+            off_requested = True
+            tasks.append(asyncio.create_task(delayed_off()))
+        elif keycode == KEYCODE_WAKEUP:
+            awake = True
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            results = await asyncio.gather(
+                coord.async_turn_off(),
+                coord.async_turn_on(wake_timeout=1.0, poll_interval=0.01),
+            )
+        await asyncio.gather(*tasks)
+        assert results == [True, True]
+        assert injected_errors == 3
+        assert awake is True
+        assert coord.data["awake"] is True
+        assert KEYCODE_WAKEUP in keys
     finally:
         await coord.async_shutdown()
