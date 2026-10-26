@@ -586,15 +586,18 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
 
                 try:
                     awake = await self._async_read_wakefulness(timeout=2.5)
-                    if awake is True:
-                        if shutdown_pending and not settled_to_standby and not wake_key_sent:
-                            # Pre-off Awake: hardware is still finishing shutdown.
+                    if shutdown_pending and not settled_to_standby and not wake_key_sent:
+                        if awake is False:
+                            settled_to_standby = True
+                        elif time.monotonic() < settle_deadline:
+                            # Pre-off Awake or indeterminate state: hardware is still finishing shutdown.
                             # Continue waiting for hardware to reach standby or settle deadline.
-                            now = time.monotonic()
-                            if now < settle_deadline:
-                                sleep_time = min(0.2, poll_interval, max(0.001, settle_deadline - now))
-                                await asyncio.sleep(sleep_time)
-                                continue
+                            sleep_time = min(0.2, poll_interval, max(0.001, settle_deadline - time.monotonic()))
+                            await asyncio.sleep(sleep_time)
+                            attempt = 1
+                            continue
+
+                    if awake is True:
                         self._mark_power_transition(awake=True)
                         return True
 
@@ -602,8 +605,8 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                         settled_to_standby = True
 
                     # Stage 2: SoC is awake and adbd responded; send idempotent KEYCODE_WAKEUP first
-                    wake_key_sent = True
                     await self.adb.async_send_key(KEYCODE_WAKEUP, timeout=3.0)
+                    wake_key_sent = True
                     await asyncio.sleep(min(0.4, poll_interval / 2))
                     recheck = await self._async_read_wakefulness(timeout=2.5)
                     if recheck is False:
