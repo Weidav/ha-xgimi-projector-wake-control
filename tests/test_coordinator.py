@@ -411,6 +411,20 @@ async def test_android_input_switch_failure_reported_as_error() -> None:
     assert coord._current_input_source == INPUT_SOURCE_APPS
     if coord.data:
         assert coord.data["input_source"] == INPUT_SOURCE_APPS
+
+    # Output with warning brought to front is successful intent delivery
+    adb.async_shell = AsyncMock(
+        return_value="Warning: Activity not started, its current task has been brought to the front"
+    )
+    success_warn = await coord.async_set_input_source(INPUT_SOURCE_HDMI2)
+    assert success_warn is True
+    assert coord._current_input_source == INPUT_SOURCE_HDMI2
+
+    # Output with command not found is a failure
+    adb.async_shell = AsyncMock(return_value="/system/bin/sh: am: not found")
+    success_not_found = await coord.async_set_input_source(INPUT_SOURCE_APPS)
+    assert success_not_found is False
+
     await coord.async_shutdown()
 
 

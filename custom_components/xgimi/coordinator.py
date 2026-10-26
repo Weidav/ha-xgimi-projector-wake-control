@@ -63,13 +63,21 @@ def is_android_shell_error(output: str) -> bool:
     if not output:
         return False
     lower = output.lower()
+    # Non-error informational warnings from 'am start' when activity is already running/foregrounded
+    if "brought to the front" in lower or "delivered to currently running" in lower:
+        return False
+    if "warning: activity not started" in lower and "error:" not in lower:
+        return False
+
     return (
         "error:" in lower
         or "error type" in lower
         or "exception" in lower
-        or "activity not started" in lower
         or "unable to resolve intent" in lower
         or "does not exist" in lower
+        or "not found" in lower
+        or "permission denial" in lower
+        or ("activity not started" in lower and "error" in lower)
     )
 
 
