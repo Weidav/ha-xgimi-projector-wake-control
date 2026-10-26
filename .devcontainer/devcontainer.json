@@ -4,6 +4,9 @@
     "mounts": [
         "source=antigravity-state,target=/home/vscode/.gemini,type=volume"
     ],
+    "containerEnv": {
+        "UV_LINK_MODE": "copy"
+    },
     "remoteEnv": {
         "PATH": "/home/vscode/.local/bin:${containerEnv:PATH}"
     },
@@ -28,5 +31,5 @@
             ]
         }
     },
-    "postCreateCommand": "sudo chown -R vscode:vscode \"$HOME/.gemini\" && curl -fsSL https://antigravity.google/cli/install.sh | bash && uv sync",
+    "postCreateCommand": "sudo chown -R vscode:vscode \"$HOME/.gemini\" && curl -fsSL https://antigravity.google/cli/install.sh | bash && uv sync"
 }
