@@ -282,6 +282,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         self.adb = adb_client or XgimiAdbClient(self.host, port=self.adb_port, hass=hass)
 
+        self._power_lock = asyncio.Lock()
         self._power_transition_until: float = 0.0
         self._optimistic_awake: bool | None = None
         self._current_input_source: str = INPUT_SOURCE_APPS
@@ -292,7 +293,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._delayed_refresh_tasks: set[asyncio.Task[Any]] = set()
         self.suppress_next_reload: bool = False
 
-    def default_state(self, *, online: bool = False, awake: bool = False) -> dict[str, Any]:
+    def default_state(self, *, online: bool = False, awake: bool | None = False) -> dict[str, Any]:
         """Return a structured state dictionary."""
         return {
             "online": online,
@@ -397,64 +398,85 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         poll_interval: float = 1.5,
     ) -> bool:
         """Execute two-stage wake: Stage 1 WoWLAN burst followed by Stage 2 ADB display ignition."""
-        deadline = time.monotonic() + wake_timeout
-        attempt = 0
+        async with self._power_lock:
+            now = time.monotonic()
+            if now < self._power_transition_until and self._optimistic_awake is True:
+                return True
 
-        while True:
-            if attempt % 2 == 0:
-                await self._send_wowlan_knocks()
-            attempt += 1
+            deadline = time.monotonic() + wake_timeout
+            attempt = 0
 
-            try:
-                awake = await self._async_read_wakefulness(timeout=2.5)
-                if awake is True:
+            while True:
+                if attempt % 2 == 0:
+                    await self._send_wowlan_knocks()
+                attempt += 1
+
+                try:
+                    awake = await self._async_read_wakefulness(timeout=2.5)
+                    if awake is True:
+                        self._mark_power_transition(awake=True)
+                        return True
+
+                    # Stage 2: SoC is awake and adbd responded; send idempotent KEYCODE_WAKEUP first
+                    await self.adb.async_send_key(KEYCODE_WAKEUP, timeout=3.0)
+                    await asyncio.sleep(min(0.4, poll_interval / 2))
+                    recheck = await self._async_read_wakefulness(timeout=2.5)
+                    if recheck is False:
+                        await self.adb.async_send_key(KEYCODE_POWER, timeout=3.0)
                     self._mark_power_transition(awake=True)
                     return True
+                except (AdbError, TimeoutError, OSError) as err:
+                    _LOGGER.debug(
+                        "Stage-2 ADB wake poll attempt %d for %s pending: %s",
+                        attempt,
+                        self.host,
+                        err,
+                    )
 
-                # Stage 2: SoC is awake and adbd responded; send idempotent KEYCODE_WAKEUP first
-                await self.adb.async_send_key(KEYCODE_WAKEUP, timeout=3.0)
-                await asyncio.sleep(min(0.4, poll_interval / 2))
-                recheck = await self._async_read_wakefulness(timeout=2.5)
-                if recheck is False:
-                    await self.adb.async_send_key(KEYCODE_POWER, timeout=3.0)
-                self._mark_power_transition(awake=True)
-                return True
-            except (AdbError, TimeoutError, OSError) as err:
-                _LOGGER.debug(
-                    "Stage-2 ADB wake poll attempt %d for %s pending: %s",
-                    attempt,
-                    self.host,
-                    err,
-                )
+                if time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(poll_interval)
 
-            if time.monotonic() >= deadline:
-                break
-            await asyncio.sleep(poll_interval)
-
-        _LOGGER.warning("Timed out waiting for XGIMI projector %s to wake", self.host)
-        return False
+            _LOGGER.warning("Timed out waiting for XGIMI projector %s to wake", self.host)
+            return False
 
     async def async_turn_off(self) -> bool:
         """Idempotently put the projector into standby after verifying it is currently Awake."""
-        try:
-            awake = await self._async_read_wakefulness(timeout=4.0)
-        except (AdbError, TimeoutError, OSError) as err:
-            _LOGGER.warning("Cannot turn off XGIMI projector %s (ADB unreachable): %s", self.host, err)
-            return False
+        async with self._power_lock:
+            now = time.monotonic()
+            if now < self._power_transition_until and self._optimistic_awake is False:
+                return True
 
-        if awake is False:
-            # Already asleep in standby — do NOT inject KEYCODE_POWER (would toggle back on!)
+            try:
+                awake = await self._async_read_wakefulness(timeout=4.0)
+            except (AdbError, TimeoutError, OSError) as err:
+                _LOGGER.warning("Cannot turn off XGIMI projector %s (ADB unreachable): %s", self.host, err)
+                return False
+
+            if awake is False:
+                # Already asleep in standby — do NOT inject KEYCODE_POWER (would toggle back on!)
+                self._mark_power_transition(awake=False)
+                return True
+
+            if awake is not True:
+                # Unknown power state — do NOT inject KEYCODE_POWER to prevent waking sleeping projector
+                _LOGGER.warning("Cannot turn off XGIMI projector %s (wakefulness state unknown)", self.host)
+                return False
+
+            try:
+                await self.adb.async_send_key(KEYCODE_POWER, timeout=4.0)
+            except (AdbError, TimeoutError, OSError) as err:
+                _LOGGER.warning("Failed to send power off keyevent to %s: %s", self.host, err)
+                # Ambiguous power toggle failure: reconnect and inspect power state
+                with contextlib.suppress(AdbError, TimeoutError, OSError):
+                    recheck = await self._async_read_wakefulness(timeout=3.0)
+                    if recheck is False:
+                        self._mark_power_transition(awake=False)
+                        return True
+                return False
+
             self._mark_power_transition(awake=False)
             return True
-
-        try:
-            await self.adb.async_send_key(KEYCODE_POWER, timeout=4.0)
-        except (AdbError, TimeoutError, OSError) as err:
-            _LOGGER.warning("Failed to send power off keyevent to %s: %s", self.host, err)
-            return False
-
-        self._mark_power_transition(awake=False)
-        return True
 
     def _mark_power_transition(self, *, awake: bool) -> None:
         """Set optimistic state during a 10s hardware transition window and schedule refreshes."""
@@ -545,7 +567,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         wake_text = "\n".join(sections.get("WAKE", []))
         parsed_awake = parse_wakefulness(wake_text)
-        awake = True if parsed_awake is None else parsed_awake
+        awake = parsed_awake
 
         # Respect optimistic power transition window if hardware has not yet settled
         now = time.monotonic()

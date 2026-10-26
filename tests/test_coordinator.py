@@ -283,3 +283,66 @@ async def test_compound_poll_and_mac_persistence_and_commands() -> None:
 
     await coord.async_shutdown()
     assert len(coord._delayed_refresh_tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_power_off_requests_coalesce() -> None:
+    """Verify overlapping turn_off requests send KEYCODE_POWER only once."""
+    hass = _make_fake_hass()
+    adb = MagicMock()
+    adb.async_send_key = AsyncMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(return_value="mWakefulness=Awake")
+
+    coord = XgimiDataUpdateCoordinator(hass, "192.168.1.50", "XGIMI Horizon 20", adb_client=adb)
+
+    res1, res2 = await asyncio.gather(coord.async_turn_off(), coord.async_turn_off())
+
+    assert res1 is True
+    assert res2 is True
+    assert adb.async_send_key.await_count == 1
+    adb.async_send_key.assert_awaited_once_with(KEYCODE_POWER, timeout=4.0)
+    assert coord.data["awake"] is False
+    await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unknown_power_state_handling() -> None:
+    """Verify unknown wakefulness prevents sending power toggle and does not default to awake."""
+    hass = _make_fake_hass()
+    adb = MagicMock()
+    adb.async_send_key = AsyncMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(return_value="")
+
+    coord = XgimiDataUpdateCoordinator(hass, "192.168.1.50", "XGIMI Horizon 20", adb_client=adb)
+
+    assert await coord.async_turn_off() is False
+    adb.async_send_key.assert_not_awaited()
+
+    poll_data = coord._parse_compound_poll("---WAKE---\nunrecognized power output\n---META---\nXR14A\n14\n")
+    assert poll_data["awake"] is None
+    assert poll_data["online"] is True
+    await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_power_off_rechecks_state_on_ambiguous_disconnect() -> None:
+    """Verify turn_off reconnects and verifies state if connection drops during power key send."""
+    hass = _make_fake_hass()
+    adb = MagicMock()
+    adb.async_send_key = AsyncMock(side_effect=AdbConnectionError("socket dropped"))
+    adb.async_close = AsyncMock()
+
+    adb.async_shell = AsyncMock(
+        side_effect=[
+            "mWakefulness=Awake",
+            "mWakefulness=Asleep",
+        ]
+    )
+
+    coord = XgimiDataUpdateCoordinator(hass, "192.168.1.50", "XGIMI Horizon 20", adb_client=adb)
+    assert await coord.async_turn_off() is True
+    assert adb.async_send_key.await_count == 1
+    assert coord.data["awake"] is False
+    await coord.async_shutdown()
