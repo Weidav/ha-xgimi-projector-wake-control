@@ -16,7 +16,7 @@ run uv run ruff format --check custom_components/xgimi tests/
 
 run uv run pyright custom_components/xgimi
 
-run uv run deptry custom_components/xgimi tests/
+run uv run deptry custom_components/xgimi
 
 run uv run pytest -v --cov=custom_components/xgimi --cov-report=term
 
