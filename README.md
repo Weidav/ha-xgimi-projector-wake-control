@@ -3,25 +3,18 @@
 [![Validate](https://github.com/Weidav/ha-xgimi-projector-wake-control/actions/workflows/validate.yml/badge.svg)](https://github.com/Weidav/ha-xgimi-projector-wake-control/actions/workflows/validate.yml)
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 
-A standalone Home Assistant integration for **XGIMI Google TV / Android 14 projectors** (designed and verified on the **XGIMI Horizon 20** series, `XR14A` / MediaTek `MT9689`.
+A standalone Home Assistant integration for **XGIMI Google TV / Android 14 projectors** (designed and verified on the **XGIMI Horizon 20** series, `XR14A` / MediaTek `MT9689`).
 
-This integration operates **natively against stock factory XGIMI firmware** over **ADB TCP (`5555`)** and **MediaTek WoWLAN**—requiring **no third-party APK** installed on the projector.
+This integration operates **natively against stock factory XGIMI firmware** over **ADB TCP (`5555`)** and **MediaTek WoWLAN**.
 
 ## Key Features
 
-- **Two-Stage Standby Wake (`WoWLAN` + `ADB`)**:
-  - **Stage 1 (SoC / Wi-Fi Radio Wake)**: Broadcasts and unicasts 102-byte Wake-on-LAN Magic Packets (UDP ports `9` & `7`), Google Cast mDNS PTR queries (`224.0.0.251:5353`), Cast HTTP eureka knocks (`8010`), and Android TV Remote knocks (`6465`).
-  - **Stage 2 (Display / Laser Ignition)**: Polls ADB (`5555`) up to 24 seconds as the SoC wakes and injects `KEYCODE_WAKEUP` (`224`) / state-guarded `KEYCODE_POWER` (`26`) to ignite the projector laser.
-- **True Power vs. Fast Boot Standby Detection**:
-  - Queries `dumpsys power` (`mWakefulness=Awake` vs `Asleep`/`Dozing`) over a pooled ADB connection so Network Standby never triggers false `awake=True` states or spurious TCP wake knocks.
-- **Idempotent Power Off**:
-  - Verifies the projector is `Awake` before sending `KEYCODE_POWER` (`26`), preventing repeated `turn_off` automations from accidentally toggling a sleeping projector back on.
-- **Zero External ADB Dependency Conflicts**:
-  - Built-in async RSA-2048 ADB wire client (`custom_components/xgimi/adb_client.py`) using Home Assistant's native `cryptography` package, persisting its keypair in `.storage/xgimi_adb_key`.
-- **Direct Input Source Switching**:
-  - Switches seamlessly between `Apps`, `HDMI 1`, and `HDMI 2` using Android TV passthrough URIs (`content://android.media.tv/passthrough/<inputId>`) and clean `com.google.android.tv.inputplayer` teardown.
-- **XGIMI Hardware & Remote Controls**:
-  - Dedicated buttons for **Auto Focus** (`140` / `KEYCODE_F10`), **Settings Dashboard** (`176`), D-Pad navigation, Volume, Mute, Google Assistant, Force Wake, and Reboot.
+Unlike Home Assistant's built-in **Android TV Remote** integration—which disconnects in standby and only exposes generic TV controls—this integration is built specifically for XGIMI projectors:
+
+- **Wake from Sleep**: Reliably powers the projector **on** from **Optimized (Network Standby)** energy mode, letting you save energy in standby while keeping full remote control and seamless Home Assistant automations.
+- **XGIMI Hardware & Remote Controls**: Trigger projector-specific functions like **Auto Focus** and the **XGIMI Settings Dashboard**, alongside full D-Pad, volume, and power controls.
+- **Direct Input Switching**: Switch directly between **Apps**, **HDMI 1**, and **HDMI 2**.
+- **100% Local, Zero APKs**: Communicates directly with stock XGIMI firmware over local ADB and Wake-on-WLAN—nothing to sideload on the projector.
 
 ## Projector Prerequisites (One-Time Setup on Projector)
 
