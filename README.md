@@ -64,11 +64,11 @@ This integration operates **natively against stock factory XGIMI firmware** over
 The integration creates **20 dedicated entities** for complete local control without requiring any Android bridge APK:
 
 ### Power & Connectivity
-| Platform        | Entity Name      | Unique ID Suffix | Description                                                                                                                                               |
-| :-------------- | :--------------- | :--------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `switch`        | **Power**        | `power`          | Turns the projector on (Two-Stage WoWLAN + ADB wake) and off (idempotent standby). Always stays available in HA so wake can be triggered from deep sleep. |
-| `binary_sensor` | **Power State**  | `power_state`    | `on` when the projector display/laser is awake (`mWakefulness=Awake`). Device class: `power`.                                                             |
-| `binary_sensor` | **Connectivity** | `connectivity`   | `on` when the projector's ADB daemon is reachable over the network (both when display is awake and in Network Standby). Device class: `connectivity`.     |
+| Platform        | Entity Name          | Unique ID Suffix   | Description                                                                                                                                               |
+| :-------------- | :------------------- | :----------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `switch`        | **Power**            | `power`            | Turns the projector on (Two-Stage WoWLAN + ADB wake) and off (idempotent standby). Always stays available in HA so wake can be triggered from deep sleep. |
+| `binary_sensor` | **Power State**      | `power_state`      | `on` when the projector display/laser is awake (`mWakefulness=Awake`). Device class: `power`.                                                             |
+| `binary_sensor` | **ADB Connectivity** | `adb_connectivity` | `on` when the projector's ADB daemon is reachable over the network (both when display is awake and in Network Standby). Device class: `connectivity`.     |
 
 ### Source Selection
 | Platform | Entity Name      | Unique ID Suffix      | Description                                                                                                                                                                 |

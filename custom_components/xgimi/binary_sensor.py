@@ -25,7 +25,7 @@ async def async_setup_entry(
     async_add_entities(
         [
             XgimiPowerBinarySensor(coordinator),
-            XgimiConnectivityBinarySensor(coordinator),
+            XgimiAdbConnectivityBinarySensor(coordinator),
         ]
     )
 
@@ -48,15 +48,15 @@ class XgimiPowerBinarySensor(XgimiEntity, BinarySensorEntity):  # pyright: ignor
         return self.coordinator.data.get("awake")
 
 
-class XgimiConnectivityBinarySensor(XgimiEntity, BinarySensorEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
+class XgimiAdbConnectivityBinarySensor(XgimiEntity, BinarySensorEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
     """Binary sensor reporting whether the projector ADB daemon is reachable on the network."""
 
-    _attr_name = "Connectivity"
+    _attr_name = "ADB Connectivity"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
 
     def __init__(self, coordinator: XgimiDataUpdateCoordinator) -> None:
-        """Initialize the connectivity binary sensor."""
-        super().__init__(coordinator, "connectivity")
+        """Initialize the ADB connectivity binary sensor."""
+        super().__init__(coordinator, "adb_connectivity")
 
     @property
     def is_on(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]

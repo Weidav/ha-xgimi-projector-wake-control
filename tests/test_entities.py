@@ -16,7 +16,7 @@ from custom_components.xgimi import (
     async_unload_entry,
 )
 from custom_components.xgimi.binary_sensor import (
-    XgimiConnectivityBinarySensor,
+    XgimiAdbConnectivityBinarySensor,
     XgimiPowerBinarySensor,
 )
 from custom_components.xgimi.binary_sensor import (
@@ -181,10 +181,12 @@ async def test_binary_sensors_distinguish_fast_boot_standby() -> None:
     hass.data = {DOMAIN: {"entry_123": coord}}
     entry = coord.config_entry
 
-    sensors: list[XgimiPowerBinarySensor | XgimiConnectivityBinarySensor] = []
+    sensors: list[XgimiPowerBinarySensor | XgimiAdbConnectivityBinarySensor] = []
     await async_setup_binary_sensors(hass, entry, sensors.extend)
     assert len(sensors) == 2
     power_sensor, conn_sensor = sensors[0], sensors[1]
+    assert conn_sensor.name == "ADB Connectivity"
+    assert conn_sensor.unique_id == "entry_123_adb_connectivity"
 
     # Awake: both True
     assert power_sensor.is_on is True
