@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 jobs:
-  pytest-and-ruff:
-    name: Pytest & Ruff
+  code-quality-and-tests:
+    name: Code Quality, Tests & Coverage
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -34,8 +34,26 @@ jobs:
           uv run ruff check custom_components/xgimi tests/
           uv run ruff format --check custom_components/xgimi tests/
 
-      - name: Run Pytest suite
-        run: uv run pytest -v
+      - name: Run Pyright type check
+        run: uv run pyright custom_components/xgimi
+
+      - name: Run Deptry dependency check
+        run: uv run deptry custom_components/xgimi tests/
+
+      - name: Run Pytest suite with coverage
+        run: |
+          uv run pytest -v --cov=custom_components/xgimi --cov-report=term --cov-report=xml --cov-report=html
+          uv run coverage report --format=markdown >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            htmlcov/
+          if-no-files-found: ignore
 
   hassfest:
     name: Hassfest Validation

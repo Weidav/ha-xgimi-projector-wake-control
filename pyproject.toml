@@ -4,11 +4,16 @@ version = "0.0.3"
 description = "Standalone Home Assistant HACS integration for XGIMI Projector Wake & Control"
 readme = "README.md"
 requires-python = ">=3.13.2"
-dependencies = []
+dependencies = [
+    "aiohttp>=3.0.0",
+    "cryptography>=46.0.0",
+    "homeassistant>=2026.0.0",
+    "voluptuous>=0.15.0",
+]
 
 [dependency-groups]
 dev = [
-    "homeassistant>=2026.0.0",
+    "deptry>=0.25.0",
     "pyright>=1.1.0",
     "pytest-homeassistant-custom-component>=0.13.0",
     "pytest>=9.0.0",
