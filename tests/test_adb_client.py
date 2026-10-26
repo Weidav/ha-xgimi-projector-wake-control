@@ -217,16 +217,16 @@ def test_pack_adb_message_and_public_key_encoding(adb_key_file: Path) -> None:
     assert exponent == numbers.e
     assert (numbers.n * n0inv) % (1 << 32) == (1 << 32) - 1
 
-    # Verify token signing (20-byte standard and non-20-byte fallback)
+    # Verify token signing requires exactly 20 bytes
     token20 = b"\x55" * 20
     sig20 = sign_adb_token(private_key, token20)
     assert len(sig20) == 256
     public_key.verify(sig20, token20, padding.PKCS1v15(), utils.Prehashed(hashes.SHA1()))
 
-    short_sig = sign_adb_token(private_key, b"short_token")
-    assert len(short_sig) == 256
+    with pytest.raises(ValueError, match="ADB AUTH_TOKEN must be exactly 20 bytes"):
+        sign_adb_token(private_key, b"short_token")
 
-    with pytest.raises(ValueError, match="Token too large"):
+    with pytest.raises(ValueError, match="ADB AUTH_TOKEN must be exactly 20 bytes"):
         sign_adb_token(private_key, b"x" * 250)
 
 
@@ -260,9 +260,8 @@ async def test_non_prompting_probe_vs_interactive_authorize(adb_key_file: Path) 
         client = XgimiAdbClient("127.0.0.1", port=server.port, key_path=adb_key_file)
 
         # Non-prompting check must NOT send AUTH_RSAPUBLICKEY
-        assert await client.async_is_authorized() is False
         assert await client.async_probe_status() == "unauthorized"
-        assert server.received_auth_types == [AUTH_SIGNATURE, AUTH_SIGNATURE]
+        assert server.received_auth_types == [AUTH_SIGNATURE]
 
         # Interactive authorize MUST send AUTH_RSAPUBLICKEY and succeed
         server.received_auth_types.clear()
@@ -280,7 +279,7 @@ async def test_shell_execution_connection_pooling_and_retry(adb_key_file: Path) 
     await server.start()
     try:
         client = XgimiAdbClient("[127.0.0.1]", port=server.port, key_path=adb_key_file)
-        assert await client.async_is_authorized() is True
+        assert await client.async_probe_status() == "authorized"
         initial_conns = server.connections_made
 
         out = await client.async_shell("dumpsys power")

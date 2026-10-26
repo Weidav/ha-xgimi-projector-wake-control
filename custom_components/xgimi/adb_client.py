@@ -45,9 +45,6 @@ HEADER_LEN = 24
 RSANUMBYTES = 256
 RSANUMWORDS = RSANUMBYTES // 4  # 64 uint32 words
 
-# PKCS#1 v1.5 DigestInfo prefix for SHA-1 (15 bytes)
-_SHA1_DIGESTINFO_PREFIX = bytes.fromhex("3021300906052b0e03021a05000414")
-
 
 class AdbError(Exception):
     """Base exception for ADB protocol errors."""
@@ -98,21 +95,13 @@ def encode_adb_public_key(public_key: rsa.RSAPublicKey, identity: str = "homeass
 
 def sign_adb_token(private_key: rsa.RSAPrivateKey, token: bytes) -> bytes:
     """Sign a 20-byte ADB AUTH_TOKEN using RSA-2048 PKCS#1 v1.5 SHA-1 DigestInfo."""
-    if len(token) == 20:
-        return private_key.sign(
-            token,
-            padding.PKCS1v15(),
-            utils.Prehashed(hashes.SHA1()),
-        )
-    # Fallback for non-20-byte test tokens using identical PKCS#1 v1.5 type-1 padding
-    digest_info = _SHA1_DIGESTINFO_PREFIX + token
-    pad_len = RSANUMBYTES - 3 - len(digest_info)
-    if pad_len < 8:
-        raise ValueError("Token too large for RSA-2048 PKCS#1 v1.5 padding")
-    em = b"\x00\x01" + (b"\xff" * pad_len) + b"\x00" + digest_info
-    pn = private_key.private_numbers()
-    sig_int = pow(int.from_bytes(em, "big"), pn.d, pn.public_numbers.n)
-    return sig_int.to_bytes(RSANUMBYTES, "big")
+    if len(token) != 20:
+        raise ValueError(f"ADB AUTH_TOKEN must be exactly 20 bytes, got {len(token)}")
+    return private_key.sign(
+        token,
+        padding.PKCS1v15(),
+        utils.Prehashed(hashes.SHA1()),
+    )
 
 
 # Maximum total shell output buffered across multiple A_WRTE chunks (1 MiB)
@@ -149,14 +138,6 @@ class XgimiAdbClient:
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._next_local_id: int = 1
-
-    def update_target(self, host: str, port: int = DEFAULT_ADB_PORT) -> None:
-        """Update target host/port and reset any cached transport."""
-        clean_host = host.strip().strip("[]")
-        if clean_host != self.host or port != self.port:
-            self.host = clean_host
-            self.port = port
-            self._close_transport_nowait()
 
     async def async_ensure_key(self) -> tuple[rsa.RSAPrivateKey, rsa.RSAPublicKey]:
         """Load or generate the persistent RSA-2048 keypair without blocking the event loop."""
@@ -331,11 +312,6 @@ class XgimiAdbClient:
         finally:
             if writer is not None:
                 await self._close_writer(writer)
-
-    async def async_is_authorized(self, timeout: float = 3.0) -> bool:
-        """Return True if the projector is reachable on port 5555 and accepts our RSA key."""
-        status = await self.async_probe_status(timeout=timeout)
-        return status == "authorized"
 
     async def async_authorize(self, timeout: float = 30.0) -> bool:
         """Trigger the on-screen ADB Allow prompt if needed and wait for user approval."""
