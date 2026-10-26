@@ -13,6 +13,7 @@ import logging
 import os
 import struct
 import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -109,6 +110,29 @@ def sign_adb_token(private_key: rsa.RSAPrivateKey, token: bytes) -> bytes:
 _MAX_SHELL_OUTPUT = 1024 * 1024
 
 
+_SHARED_KEY_LOCKS: dict[Path, asyncio.Lock] = {}
+_SHARED_KEY_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _get_shared_key_lock(path: Path) -> asyncio.Lock:
+    """Return a shared asyncio Lock for the given canonical key path."""
+    canonical = path.resolve()
+    async with _SHARED_KEY_LOCKS_GUARD:
+        if canonical not in _SHARED_KEY_LOCKS:
+            _SHARED_KEY_LOCKS[canonical] = asyncio.Lock()
+        return _SHARED_KEY_LOCKS[canonical]
+
+
+def is_safe_to_retry_command(command: str) -> bool:
+    """Return True if an ADB shell command is idempotent and safe to retry on disconnect."""
+    cmd = command.strip()
+    if cmd.startswith("input "):
+        return False
+    if "keyevent" in cmd:
+        return False
+    return True
+
+
 class XgimiAdbClient:
     """Async ADB client speaking the native ADB TCP protocol on port 5555."""
 
@@ -132,7 +156,6 @@ class XgimiAdbClient:
 
         self._private_key: rsa.RSAPrivateKey | None = None
         self._public_key: rsa.RSAPublicKey | None = None
-        self._key_lock = asyncio.Lock()
         self._cmd_lock = asyncio.Lock()
 
         # Persistent authenticated transport for low-latency shell/key commands
@@ -145,7 +168,8 @@ class XgimiAdbClient:
         if self._private_key is not None and self._public_key is not None:
             return self._private_key, self._public_key
 
-        async with self._key_lock:
+        lock = await _get_shared_key_lock(self._key_path)
+        async with lock:
             if self._private_key is not None and self._public_key is not None:
                 return self._private_key, self._public_key
 
@@ -178,7 +202,7 @@ class XgimiAdbClient:
         )
         try:
             key_file.parent.mkdir(parents=True, exist_ok=True)
-            tmp_file = key_file.with_suffix(".tmp")
+            tmp_file = key_file.with_name(f"{key_file.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
             tmp_file.write_bytes(pem_data)
             with contextlib.suppress(OSError):
                 os.chmod(tmp_file, 0o600)
@@ -414,8 +438,9 @@ class XgimiAdbClient:
 
         return output.decode("utf-8", errors="replace").strip()
 
-    async def async_shell(self, command: str, timeout: float = 5.0) -> str:
-        """Execute a bounded shell command over ADB, retrying once if a pooled socket went stale."""
+    async def async_shell(self, command: str, timeout: float = 5.0, retry: bool | None = None) -> str:
+        """Execute a bounded shell command over ADB, retrying once if safe and socket was stale."""
+        should_retry = is_safe_to_retry_command(command) if retry is None else retry
         deadline = time.monotonic() + timeout
         async with self._cmd_lock:
             remaining = deadline - time.monotonic()
@@ -433,7 +458,7 @@ class XgimiAdbClient:
                     await self._close_transport_locked()
                     if isinstance(err, TimeoutError):
                         raise
-                    if not had_existing_conn:
+                    if not had_existing_conn or not should_retry:
                         if isinstance(err, AdbError):
                             raise
                         raise AdbConnectionError(f"ADB shell command failed on {self.host}:{self.port}: {err}") from err
@@ -463,7 +488,7 @@ class XgimiAdbClient:
         """Inject an Android keycode over the pooled ADB connection."""
         if type(keycode) is not int or not (0 <= keycode <= 1000):
             raise ValueError(f"Invalid Android keycode: {keycode}")
-        await self.async_shell(f"input keyevent {keycode}", timeout=timeout)
+        await self.async_shell(f"input keyevent {keycode}", timeout=timeout, retry=False)
 
     def close_transport_nowait(self) -> None:
         """Close the cached writer without awaiting."""

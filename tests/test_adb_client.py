@@ -49,12 +49,14 @@ class FakeAdbdServer:
         immediate_cnxn: bool = False,
         drop_first_open: bool = False,
         hang_handshake: bool = False,
+        drop_on_keyevent: bool = False,
     ) -> None:
         self.accept_signature = accept_signature
         self.accept_pubkey = accept_pubkey
         self.immediate_cnxn = immediate_cnxn
         self.drop_first_open = drop_first_open
         self.hang_handshake = hang_handshake
+        self.drop_on_keyevent = drop_on_keyevent
 
         self.received_auth_types: list[int] = []
         self.executed_commands: list[str] = []
@@ -63,6 +65,7 @@ class FakeAdbdServer:
         self._server: asyncio.AbstractServer | None = None
         self.port: int = 0
         self._dropped_once = False
+        self._stop_event = asyncio.Event()
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._handle_client, "127.0.0.1", 0)
@@ -70,6 +73,7 @@ class FakeAdbdServer:
         self.port = sock.getsockname()[1]
 
     async def stop(self) -> None:
+        self._stop_event.set()
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -94,7 +98,7 @@ class FakeAdbdServer:
                 return
 
             if self.hang_handshake:
-                await asyncio.sleep(10.0)
+                await self._stop_event.wait()
                 return
 
             if self.immediate_cnxn:
@@ -143,6 +147,11 @@ class FakeAdbdServer:
                     dest = payload.rstrip(b"\x00").decode("utf-8", errors="replace")
                     shell_cmd = dest.removeprefix("shell:")
                     self.executed_commands.append(shell_cmd)
+
+                    if self.drop_on_keyevent and shell_cmd.startswith("input keyevent"):
+                        writer.close()
+                        await writer.wait_closed()
+                        return
 
                     if shell_cmd == "reject_open":
                         await self._write_msg(writer, A_CLSE, 0, local_id)
@@ -441,3 +450,42 @@ async def test_handshake_cancellation_cleans_up_socket(adb_key_file: Path) -> No
             assert client._writer is None
     finally:
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_power_command_does_not_retry_on_disconnect(adb_key_file: Path) -> None:
+    """Verify non-idempotent power command executes once and is not retried when connection drops."""
+    server = FakeAdbdServer(accept_signature=True, drop_on_keyevent=True)
+    await server.start()
+    try:
+        client = XgimiAdbClient("127.0.0.1", port=server.port, key_path=adb_key_file)
+        # First ensure connection is established
+        assert await client.async_probe_status() == "authorized"
+
+        # Sending power keyevent (26)
+        with pytest.raises(AdbConnectionError):
+            await client.async_send_key(26, timeout=2.0)
+
+        # Must have been sent to server EXACTLY ONCE, not retried!
+        assert server.executed_commands.count("input keyevent 26") == 1
+        assert client._writer is None
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_key_initialization_shares_key(tmp_path: Path) -> None:
+    """Verify two concurrent clients initializing a missing key file share the generated key."""
+    key_path = tmp_path / "shared_concurrent_key"
+    client1 = XgimiAdbClient("127.0.0.1", key_path=key_path)
+    client2 = XgimiAdbClient("127.0.0.1", key_path=key_path)
+
+    (priv1, pub1), (priv2, pub2) = await asyncio.gather(
+        client1.async_ensure_key(),
+        client2.async_ensure_key(),
+    )
+
+    assert pub1.public_numbers().n == pub2.public_numbers().n
+    # Verify key persisted on disk also matches
+    _disk_priv, disk_pub = client1._load_or_create_key_sync()
+    assert pub1.public_numbers().n == disk_pub.public_numbers().n
