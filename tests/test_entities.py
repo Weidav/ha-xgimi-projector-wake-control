@@ -251,6 +251,7 @@ async def test_buttons_autofocus_settings_wake_and_restart() -> None:
 
     assert isinstance(autofocus_btn, XgimiKeyButton)
     assert isinstance(wake_btn, XgimiWakeButton)
+    assert wake_btn.name == "Force Wake Projector"
     assert isinstance(restart_btn, XgimiRestartButton)
     assert restart_btn.entity_category == EntityCategory.CONFIG
 

@@ -62,7 +62,7 @@ class XgimiKeyButton(XgimiEntity, ButtonEntity):  # pyright: ignore[reportIncomp
 class XgimiWakeButton(XgimiEntity, ButtonEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
     """Button entity to explicitly trigger the two-stage WoWLAN + ADB wake burst."""
 
-    _attr_name = "Wake Projector"
+    _attr_name = "Force Wake Projector"
     _attr_icon = "mdi:power-on"
 
     def __init__(self, coordinator: XgimiDataUpdateCoordinator) -> None:
