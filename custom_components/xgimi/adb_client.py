@@ -111,16 +111,14 @@ _MAX_SHELL_OUTPUT = 1024 * 1024
 
 
 _SHARED_KEY_LOCKS: dict[Path, asyncio.Lock] = {}
-_SHARED_KEY_LOCKS_GUARD = asyncio.Lock()
 
 
-async def _get_shared_key_lock(path: Path) -> asyncio.Lock:
+def _get_shared_key_lock(path: Path) -> asyncio.Lock:
     """Return a shared asyncio Lock for the given canonical key path."""
     canonical = path.resolve()
-    async with _SHARED_KEY_LOCKS_GUARD:
-        if canonical not in _SHARED_KEY_LOCKS:
-            _SHARED_KEY_LOCKS[canonical] = asyncio.Lock()
-        return _SHARED_KEY_LOCKS[canonical]
+    if canonical not in _SHARED_KEY_LOCKS:
+        _SHARED_KEY_LOCKS[canonical] = asyncio.Lock()
+    return _SHARED_KEY_LOCKS[canonical]
 
 
 def is_safe_to_retry_command(command: str) -> bool:
@@ -128,7 +126,11 @@ def is_safe_to_retry_command(command: str) -> bool:
     cmd = command.strip()
     if cmd.startswith("input "):
         return False
-    return "keyevent" not in cmd
+    if "keyevent" in cmd:
+        return False
+    if "reboot" in cmd or "powerctl" in cmd:
+        return False
+    return True
 
 
 class XgimiAdbClient:
@@ -166,7 +168,7 @@ class XgimiAdbClient:
         if self._private_key is not None and self._public_key is not None:
             return self._private_key, self._public_key
 
-        lock = await _get_shared_key_lock(self._key_path)
+        lock = _get_shared_key_lock(self._key_path)
         async with lock:
             if self._private_key is not None and self._public_key is not None:
                 return self._private_key, self._public_key
@@ -198,6 +200,7 @@ class XgimiAdbClient:
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         )
+        tmp_file: Path | None = None
         try:
             key_file.parent.mkdir(parents=True, exist_ok=True)
             tmp_file = key_file.with_name(f"{key_file.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
@@ -205,8 +208,13 @@ class XgimiAdbClient:
             with contextlib.suppress(OSError):
                 os.chmod(tmp_file, 0o600)
             os.replace(tmp_file, key_file)
+            tmp_file = None
         except OSError as err:
             _LOGGER.debug("Could not persist ADB key to %s: %s", key_file, err)
+        finally:
+            if tmp_file is not None:
+                with contextlib.suppress(OSError):
+                    tmp_file.unlink(missing_ok=True)
 
         return private_key, private_key.public_key()
 
@@ -510,7 +518,8 @@ class XgimiAdbClient:
         """Safely close and await an asyncio StreamWriter."""
         with contextlib.suppress(OSError, TimeoutError, RuntimeError):
             writer.close()
-            await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(writer.wait_closed()), timeout=1.0)
 
     async def async_close(self) -> None:
         """Close any persistent ADB socket cleanly."""

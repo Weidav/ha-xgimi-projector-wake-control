@@ -472,6 +472,15 @@ async def test_power_command_does_not_retry_on_disconnect(adb_key_file: Path) ->
     finally:
         await server.stop()
 
+    from custom_components.xgimi.adb_client import is_safe_to_retry_command
+
+    assert is_safe_to_retry_command("dumpsys power") is True
+    assert is_safe_to_retry_command("getprop ro.product.model") is True
+    assert is_safe_to_retry_command("input keyevent 26") is False
+    assert is_safe_to_retry_command("input tap 100 200") is False
+    assert is_safe_to_retry_command("setprop sys.powerctl reboot") is False
+    assert is_safe_to_retry_command("svc power reboot") is False
+
 
 @pytest.mark.asyncio
 async def test_concurrent_key_initialization_shares_key(tmp_path: Path) -> None:
