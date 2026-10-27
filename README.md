@@ -87,3 +87,11 @@ The integration creates **20 dedicated entities** for complete local control wit
 | `button` | **Mute**                 | `mdi:volume-mute`                   | `164` (`KEYCODE_MUTE`)       | Toggles projector audio mute.                                                                                                                                                         |
 | `button` | **Assistant**            | `mdi:microphone`                    | `219` (`KEYCODE_ASSISTANT`)  | Activates Google Assistant voice prompt.                                                                                                                                              |
 | `button` | **Restart Projector**    | `mdi:restart`                       | Shell Reboot                 | Reboots the projector via ADB shell (`EntityCategory.CONFIG`, device class: `restart`).                                                                                               |
+
+## TODO
+
+- test the hardened wake-up / power-on for a few days
+- check if the "Enable ADB over TCP" matches the projecetor settings-menu naming
+- add a table of XGIMI Projectors where this is tested on
+- add a github-issue blueprint for users to add projectors, or suggest them to edit the table
+- add some sort of sponsor-me
