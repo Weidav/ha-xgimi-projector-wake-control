@@ -535,7 +535,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
         *,
         wake_timeout: float = 30.0,
         poll_interval: float = 1.5,
-        power_on_settle_timeout: float = 3.0,
+        power_on_settle_timeout: float = 8.0,
     ) -> bool:
         """Execute two-stage wake: Stage 1 WoWLAN burst followed by Stage 2 ADB display ignition."""
         async with self._power_lock:
@@ -543,27 +543,47 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
             deadline = start_time + wake_timeout
             self._power_on_pending = False
             last_observed_wakefulness: bool | None = None
+            last_adb_reachable: bool = False
+
+            def _record_wake_failure() -> None:
+                base = (
+                    self.data
+                    if self.data
+                    else self.default_state(online=last_adb_reachable, awake=last_observed_wakefulness)
+                )
+                current: XgimiCoordinatorData = {
+                    **base,
+                    "online": last_adb_reachable,
+                    "awake": last_observed_wakefulness,
+                }
+                self.async_set_updated_data(current)
 
             try:
                 # 1. Fast check if already awake from a recent confirmed power transition
                 now = time.monotonic()
                 if now < self._power_transition_until and self._optimistic_awake is True:
-                    with contextlib.suppress(AdbError, TimeoutError, OSError):
-                        fresh = await self._async_read_wakefulness(timeout=2.0)
-                        last_observed_wakefulness = fresh
-                        _LOGGER.debug(
-                            "[%s] [+%.2fs] Read wakefulness during active power transition: %s",
-                            self.host,
-                            time.monotonic() - start_time,
-                            "Awake" if fresh is True else ("Asleep" if fresh is False else "None/indeterminate"),
-                        )
-                        if fresh is True:
-                            _LOGGER.info(
-                                "[%s] [+%.2fs] Projector is already awake from recent power transition",
+                    rem_fast = deadline - time.monotonic()
+                    if rem_fast > 0:
+                        try:
+                            fresh = await self._async_read_wakefulness(timeout=min(2.0, max(0.01, rem_fast)))
+                            last_adb_reachable = True
+                            last_observed_wakefulness = fresh
+                            _LOGGER.debug(
+                                "[%s] [+%.2fs] Read wakefulness during active power transition: %s",
                                 self.host,
                                 time.monotonic() - start_time,
+                                "Awake" if fresh is True else ("Asleep" if fresh is False else "None/indeterminate"),
                             )
-                            return True
+                            if fresh is True:
+                                _LOGGER.info(
+                                    "[%s] [+%.2fs] Projector is already awake from recent power transition",
+                                    self.host,
+                                    time.monotonic() - start_time,
+                                )
+                                return True
+                        except (AdbError, TimeoutError, OSError):
+                            last_adb_reachable = False
+                            last_observed_wakefulness = None
                     self._optimistic_awake = None
                     self._power_transition_until = 0.0
 
@@ -582,9 +602,12 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                         max(0.0, settle_deadline - time.monotonic()),
                     )
                     while time.monotonic() < settle_deadline:
-                        rem_settle = max(0.01, settle_deadline - time.monotonic())
+                        rem_settle = settle_deadline - time.monotonic()
+                        if rem_settle <= 0:
+                            break
                         try:
-                            settle_state = await self._async_read_wakefulness(timeout=min(2.0, rem_settle))
+                            settle_state = await self._async_read_wakefulness(timeout=min(2.0, max(0.01, rem_settle)))
+                            last_adb_reachable = True
                             last_observed_wakefulness = settle_state
                             _LOGGER.debug(
                                 "[%s] [+%.2fs] Standby settle poll wakefulness: %s",
@@ -600,6 +623,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                                 settled_to_standby = True
                                 break
                         except (AdbError, TimeoutError, OSError) as err:
+                            last_adb_reachable = False
                             last_observed_wakefulness = None
                             consecutive_errors += 1
                             _LOGGER.debug(
@@ -612,6 +636,8 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                             )
                             if consecutive_errors >= 3:
                                 break
+                        if time.monotonic() >= settle_deadline:
+                            break
                         sleep_time = min(0.2, poll_interval, max(0.001, settle_deadline - time.monotonic()))
                         await asyncio.sleep(sleep_time)
 
@@ -623,6 +649,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                                 time.monotonic() - start_time,
                                 self.host,
                             )
+                            _record_wake_failure()
                             return False
                         if time.monotonic() >= settle_deadline:
                             settled = True
@@ -634,14 +661,15 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                 attempt = 0
                 wake_key_sent = False
                 power_toggle_sent = False
+                power_toggle_ambiguous = False
                 power_toggle_count = 0
 
                 effective_settle_duration = min(
                     power_on_settle_timeout,
-                    max(poll_interval * 2, wake_timeout * 0.2),
+                    max(poll_interval * 2, wake_timeout * 0.55),
                 )
 
-                while True:
+                while time.monotonic() < deadline:
                     if attempt % 2 == 0:
                         _LOGGER.info(
                             "[%s] [+%.2fs] Sending Stage 1 WoWLAN knock burst (burst %d)",
@@ -652,9 +680,13 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                         await self._send_wowlan_knocks()
                     attempt += 1
 
+                    if time.monotonic() >= deadline:
+                        break
+
                     try:
                         rem_deadline = max(0.01, deadline - time.monotonic())
                         awake = await self._async_read_wakefulness(timeout=min(2.5, rem_deadline))
+                        last_adb_reachable = True
                         last_observed_wakefulness = awake
                         _LOGGER.debug(
                             "[%s] [+%.2fs] Stage 2 wake poll wakefulness: %s (attempt %d)",
@@ -665,6 +697,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                         )
                     except (AdbError, TimeoutError, OSError) as err:
                         awake = None
+                        last_adb_reachable = False
                         last_observed_wakefulness = None
                         _LOGGER.debug(
                             "[%s] [+%.2fs] Stage 2 wake poll ADB error (attempt %d): %s (%s)",
@@ -677,10 +710,20 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
 
                     # Handle lingering shutdown settling if device is still shutting down
                     if shutdown_pending and not settled_to_standby and not wake_key_sent:
+                        lingering_settle_deadline = min(
+                            settle_deadline,
+                            start_time + min(2.0, wake_timeout * 0.6),
+                        )
                         if awake is False:
                             settled_to_standby = True
-                        elif time.monotonic() < settle_deadline:
-                            sleep_time = min(0.2, poll_interval, max(0.001, settle_deadline - time.monotonic()))
+                        elif time.monotonic() < lingering_settle_deadline:
+                            if time.monotonic() >= deadline:
+                                break
+                            sleep_time = min(
+                                0.2,
+                                poll_interval,
+                                max(0.001, min(lingering_settle_deadline, deadline) - time.monotonic()),
+                            )
                             await asyncio.sleep(sleep_time)
                             attempt = 1
                             continue
@@ -698,38 +741,51 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                     if awake is False:
                         settled_to_standby = True
 
-                    # If power toggle was previously sent and state is still indeterminate:
-                    # NEVER send another KEYCODE_POWER toggle without fresh positive Asleep evidence!
+                    # If a power toggle was already sent:
+                    # Only allow a single recovery retry when delivery was clean (not ambiguous),
+                    # the settle holdoff window has elapsed, fresh positive Asleep evidence arrived,
+                    # and sufficient budget remains before deadline.
                     if power_toggle_sent:
-                        if awake is False:
-                            # Fresh positive Asleep evidence arrived after settle window!
+                        if (
+                            awake is False
+                            and not power_toggle_ambiguous
+                            and power_toggle_count < 2
+                            and (deadline - time.monotonic()) >= max(poll_interval * 2, 0.04)
+                        ):
                             _LOGGER.info(
-                                "[%s] [+%.2fs] Previous KEYCODE_POWER was ignored (projector still Asleep); retry allowed",
+                                "[%s] [+%.2fs] Projector still Asleep after %.2fs settle window; allowing one recovery retry",
                                 self.host,
                                 time.monotonic() - start_time,
+                                effective_settle_duration,
                             )
                             power_toggle_sent = False
                             self._power_on_pending = False
                         else:
-                            # State is still indeterminate (None) or ADB unreachable.
-                            # Safe to send idempotent KEYCODE_WAKEUP, but do NOT send KEYCODE_POWER toggle!
                             _LOGGER.debug(
-                                "[%s] [+%.2fs] Power transition pending or state indeterminate (%s); skipping KEYCODE_POWER toggle",
+                                "[%s] [+%.2fs] Power transition pending or state indeterminate (awake=%s, ambiguous=%s, count=%d); skipping KEYCODE_POWER toggle",
                                 self.host,
                                 time.monotonic() - start_time,
                                 "None" if awake is None else str(awake),
+                                power_toggle_ambiguous,
+                                power_toggle_count,
                             )
+                            if time.monotonic() >= deadline:
+                                break
                             with contextlib.suppress(AdbError, TimeoutError, OSError):
                                 await self.adb.async_send_key(
                                     KEYCODE_WAKEUP,
                                     timeout=min(3.0, max(0.01, deadline - time.monotonic())),
                                 )
+                            if time.monotonic() >= deadline:
+                                break
                             sleep_time = min(poll_interval, max(0.001, deadline - time.monotonic()))
                             await asyncio.sleep(sleep_time)
                             continue
 
                     # State is confirmed Asleep (awake is False) and no power toggle is pending:
                     if awake is False:
+                        if time.monotonic() >= deadline:
+                            break
                         # 1. Send idempotent KEYCODE_WAKEUP first
                         try:
                             _LOGGER.info(
@@ -748,15 +804,22 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                                 type(err).__name__,
                                 err,
                             )
+                            if time.monotonic() >= deadline:
+                                break
                             sleep_time = min(poll_interval, max(0.001, deadline - time.monotonic()))
                             await asyncio.sleep(sleep_time)
                             continue
 
+                        if time.monotonic() >= deadline:
+                            break
                         # Check if KEYCODE_WAKEUP woke the device
-                        await asyncio.sleep(min(0.6, poll_interval / 2))
+                        await asyncio.sleep(min(0.6, poll_interval / 2, max(0.001, deadline - time.monotonic())))
+                        if time.monotonic() >= deadline:
+                            break
                         try:
                             rem_recheck = max(0.01, deadline - time.monotonic())
                             recheck = await self._async_read_wakefulness(timeout=min(2.5, rem_recheck))
+                            last_adb_reachable = True
                             last_observed_wakefulness = recheck
                             _LOGGER.debug(
                                 "[%s] [+%.2fs] Post-WAKEUP wakefulness read: %s",
@@ -776,6 +839,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                                 return True
                         except (AdbError, TimeoutError, OSError) as err:
                             recheck = None
+                            last_adb_reachable = False
                             last_observed_wakefulness = None
                             _LOGGER.debug(
                                 "[%s] [+%.2fs] Post-WAKEUP wakefulness check failed: %s (%s)",
@@ -788,6 +852,8 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                         # If recheck is confirmed False (Asleep), KEYCODE_WAKEUP was insufficient.
                         # Send KEYCODE_POWER toggle and enter the power-on settle window.
                         if recheck is False:
+                            if time.monotonic() >= deadline:
+                                break
                             power_toggle_count += 1
                             _LOGGER.info(
                                 "[%s] [+%.2fs] Sending KEYCODE_POWER toggle (attempt %d)",
@@ -796,12 +862,14 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                                 power_toggle_count,
                             )
                             power_toggle_sent = True
+                            power_toggle_ambiguous = False
                             self._power_on_pending = True
-                            last_observed_wakefulness = None
                             try:
                                 rem_pwr = max(0.01, deadline - time.monotonic())
                                 await self.adb.async_send_key(KEYCODE_POWER, timeout=min(3.0, rem_pwr))
                             except (AdbError, TimeoutError, OSError) as err:
+                                power_toggle_ambiguous = True
+                                last_adb_reachable = False
                                 _LOGGER.debug(
                                     "[%s] [+%.2fs] KEYCODE_POWER send encountered error (key may have been delivered): %s (%s)",
                                     self.host,
@@ -816,9 +884,12 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                             while time.monotonic() < toggle_settle_deadline:
                                 sleep_sub = min(settle_interval, max(0.001, toggle_settle_deadline - time.monotonic()))
                                 await asyncio.sleep(sleep_sub)
+                                if time.monotonic() >= deadline:
+                                    break
                                 try:
                                     rem_settle_poll = max(0.01, deadline - time.monotonic())
                                     post_power = await self._async_read_wakefulness(timeout=min(2.5, rem_settle_poll))
+                                    last_adb_reachable = True
                                     last_observed_wakefulness = post_power
                                     _LOGGER.debug(
                                         "[%s] [+%.2fs] Power toggle settle poll: %s",
@@ -837,6 +908,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                                         self._mark_power_transition(awake=True)
                                         return True
                                 except (AdbError, TimeoutError, OSError) as err:
+                                    last_adb_reachable = False
                                     last_observed_wakefulness = None
                                     _LOGGER.debug(
                                         "[%s] [+%.2fs] Power toggle settle poll error: %s (%s)",
@@ -865,13 +937,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                     if last_observed_wakefulness is True
                     else ("Asleep" if last_observed_wakefulness is False else "None/indeterminate"),
                 )
-                if self.data:
-                    current: XgimiCoordinatorData = {
-                        **self.data,
-                        "online": last_observed_wakefulness is not None,
-                        "awake": last_observed_wakefulness,
-                    }
-                    self.async_set_updated_data(current)
+                _record_wake_failure()
                 return False
 
             finally:

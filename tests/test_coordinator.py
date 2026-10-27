@@ -1505,3 +1505,361 @@ async def test_turn_on_power_key_timeout_during_slow_transition_does_not_double_
         assert coord.data["awake"] is True
     finally:
         await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_regression_persistent_adb_failure_after_power() -> None:
+    """1. Persistent ADB failure after POWER: bounded failure, retries stop, lock released."""
+    power_accepted = False
+    shell_calls_after_power = 0
+
+    async def shell(command: str, **kwargs: object) -> str:
+        nonlocal shell_calls_after_power
+        if power_accepted:
+            shell_calls_after_power += 1
+            raise AdbConnectionError("Persistent ADB read failure after POWER")
+        return "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal power_accepted
+        if keycode == KEYCODE_POWER:
+            power_accepted = True
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            ok = await asyncio.wait_for(
+                coord.async_turn_on(wake_timeout=0.15, poll_interval=0.02, power_on_settle_timeout=0.04),
+                timeout=0.8,
+            )
+
+        assert ok is False
+        assert power_accepted is True
+        assert coord._power_lock.locked() is False
+        assert coord.data is not None
+        assert coord.data["online"] is False
+        assert coord.data["awake"] is None
+
+        calls_at_exit = shell_calls_after_power
+        await asyncio.sleep(0.05)
+        assert shell_calls_after_power == calls_at_exit
+
+        # Verify another power request can proceed without blocking
+        adb.async_shell = AsyncMock(return_value="mWakefulness=Asleep")
+        off_ok = await asyncio.wait_for(coord.async_turn_off(), timeout=0.5)
+        assert off_ok is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_regression_persistent_wakeup_command_failure() -> None:
+    """2. Persistent WAKEUP command failure: bounded completion and lock release."""
+    wakeup_attempts = 0
+
+    async def shell(command: str, **kwargs: object) -> str:
+        return "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal wakeup_attempts
+        if keycode == KEYCODE_WAKEUP:
+            wakeup_attempts += 1
+            raise AdbError("Persistent WAKEUP failure")
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            ok = await asyncio.wait_for(
+                coord.async_turn_on(wake_timeout=0.15, poll_interval=0.02),
+                timeout=0.8,
+            )
+
+        assert ok is False
+        assert wakeup_attempts >= 1
+        assert coord._power_lock.locked() is False
+        assert coord.data is not None
+        assert coord.data["online"] is True
+        assert coord.data["awake"] is False
+
+        attempts_at_exit = wakeup_attempts
+        await asyncio.sleep(0.05)
+        assert wakeup_attempts == attempts_at_exit
+
+        # Subsequent power request proceeds without blocking
+        off_ok = await asyncio.wait_for(coord.async_turn_off(), timeout=0.5)
+        assert off_ok is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_regression_working_adb_with_unknown_wakefulness() -> None:
+    """3. Working ADB with unknown wakefulness: awake=None while online=True."""
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(return_value="PowerManagerService: unrecognized power state output")
+    adb.async_send_key = AsyncMock()
+
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        # Case A: coord.data initially None
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            ok1 = await asyncio.wait_for(
+                coord.async_turn_on(wake_timeout=0.10, poll_interval=0.02),
+                timeout=0.8,
+            )
+        assert ok1 is False
+        assert coord.data is not None
+        assert coord.data["awake"] is None
+        assert coord.data["online"] is True
+
+        # Case B: coord.data initially populated
+        coord.data = coord.default_state(online=False, awake=False)
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            ok2 = await asyncio.wait_for(
+                coord.async_turn_on(wake_timeout=0.10, poll_interval=0.02),
+                timeout=0.8,
+            )
+        assert ok2 is False
+        assert coord.data["awake"] is None
+        assert coord.data["online"] is True
+        adb.async_send_key.assert_not_awaited()
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_regression_accepted_but_delayed_power_no_double_toggle() -> None:
+    """4. Accepted but delayed POWER: time-driven toggle after old settle window does not double-toggle."""
+    awake = False
+    power_keys: list[int] = []
+    scheduled_tasks: list[asyncio.Task[None]] = []
+
+    async def _delayed_toggle(delay: float) -> None:
+        nonlocal awake
+        await asyncio.sleep(delay)
+        awake = not awake
+
+    async def shell(command: str, **kwargs: object) -> str:
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        if keycode == KEYCODE_POWER:
+            power_keys.append(keycode)
+            # Transition completes at 0.20s, which is after HEAD's 0.12s (0.6 * 0.2) settling window
+            scheduled_tasks.append(asyncio.create_task(_delayed_toggle(0.20)))
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            ok = await asyncio.wait_for(
+                coord.async_turn_on(wake_timeout=0.6, poll_interval=0.02),
+                timeout=1.5,
+            )
+
+        if scheduled_tasks:
+            await asyncio.wait_for(asyncio.gather(*scheduled_tasks), timeout=1.0)
+
+        assert ok is True
+        assert power_keys == [KEYCODE_POWER]
+        assert awake is True
+        assert coord.data["awake"] is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_regression_ambiguous_command_delivery() -> None:
+    """5. Ambiguous command delivery: verify state without blindly repeating POWER (before & after deadline)."""
+    # Scenario A: Ambiguous timeout on POWER, transition completes after settle window but before deadline
+    awake = False
+    power_keys: list[int] = []
+    scheduled_tasks: list[asyncio.Task[None]] = []
+
+    async def _delayed_toggle(delay: float) -> None:
+        nonlocal awake
+        await asyncio.sleep(delay)
+        awake = not awake
+
+    async def shell(command: str, **kwargs: object) -> str:
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key_timeout(keycode: int, **kwargs: object) -> None:
+        if keycode == KEYCODE_POWER:
+            power_keys.append(keycode)
+            scheduled_tasks.append(asyncio.create_task(_delayed_toggle(0.14)))
+            raise TimeoutError("Ambiguous timeout after delivering KEYCODE_POWER")
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key_timeout)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            ok = await asyncio.wait_for(
+                coord.async_turn_on(wake_timeout=0.45, poll_interval=0.02, power_on_settle_timeout=0.04),
+                timeout=1.2,
+            )
+
+        if scheduled_tasks:
+            await asyncio.wait_for(asyncio.gather(*scheduled_tasks), timeout=1.0)
+
+        assert ok is True
+        assert power_keys == [KEYCODE_POWER]
+        assert awake is True
+        assert coord.data["awake"] is True
+
+        # Scenario B: Ambiguous disconnect on POWER, transition completes AFTER overall wake deadline
+        awake = False
+        power_keys.clear()
+        scheduled_tasks.clear()
+
+        async def key_late_disconnect(keycode: int, **kwargs: object) -> None:
+            if keycode == KEYCODE_POWER:
+                power_keys.append(keycode)
+                scheduled_tasks.append(asyncio.create_task(_delayed_toggle(0.25)))
+                raise AdbConnectionError("Socket closed ambiguously during KEYCODE_POWER")
+
+        adb.async_send_key = AsyncMock(side_effect=key_late_disconnect)
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            ok_late = await asyncio.wait_for(
+                coord.async_turn_on(wake_timeout=0.12, poll_interval=0.02, power_on_settle_timeout=0.03),
+                timeout=0.8,
+            )
+
+        assert ok_late is False
+        assert power_keys == [KEYCODE_POWER]
+        assert coord.data["awake"] is False
+
+        if scheduled_tasks:
+            await asyncio.wait_for(asyncio.gather(*scheduled_tasks), timeout=1.0)
+        assert awake is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_regression_genuinely_ignored_wake_commands_recover() -> None:
+    """6. Genuinely ignored wake commands: recovery completes within a single turn_on request."""
+    awake = False
+    power_keys: list[int] = []
+    start = time.monotonic()
+
+    async def shell(command: str, **kwargs: object) -> str:
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake
+        if keycode == KEYCODE_POWER:
+            power_keys.append(keycode)
+        # Waking SoC ignores all wake commands during initial 0.06s window
+        if time.monotonic() - start < 0.06:
+            return
+        if keycode == KEYCODE_POWER:
+            awake = True
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            ok = await asyncio.wait_for(
+                coord.async_turn_on(wake_timeout=0.6, poll_interval=0.02, power_on_settle_timeout=0.08),
+                timeout=1.5,
+            )
+
+        assert ok is True
+        assert len(power_keys) == 2
+        assert awake is True
+        assert coord.data["awake"] is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_regression_concurrent_power_requests_serialization_and_recovery() -> None:
+    """7. Concurrent power requests: serialized, no duplicate POWER, failed wake does not block subsequent calls."""
+    awake = False
+    power_keys: list[int] = []
+    fail_reads_after_power = True
+    in_flight = 0
+    max_in_flight = 0
+
+    async def shell(command: str, **kwargs: object) -> str:
+        if fail_reads_after_power and power_keys:
+            raise AdbConnectionError("ADB read failed after POWER")
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake
+        if keycode == KEYCODE_POWER:
+            power_keys.append(keycode)
+            if not fail_reads_after_power:
+                await asyncio.sleep(0.03)
+                awake = not awake
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+
+    orig_read = coord._async_read_wakefulness
+
+    async def tracked_read(timeout: float = 3.0) -> bool | None:
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        try:
+            return await orig_read(timeout=timeout)
+        finally:
+            in_flight -= 1
+
+    coord._async_read_wakefulness = tracked_read  # type: ignore[method-assign]
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            # 1) Failed/timed-out wake must release lock and not block subsequent requests
+            ok_fail = await asyncio.wait_for(
+                coord.async_turn_on(wake_timeout=0.12, poll_interval=0.02, power_on_settle_timeout=0.03),
+                timeout=0.8,
+            )
+            assert ok_fail is False
+            assert coord._power_lock.locked() is False
+
+            # 2) Recover ADB and run two concurrent turn_on requests -> serialized, single POWER
+            fail_reads_after_power = False
+            power_keys.clear()
+            res1, res2 = await asyncio.wait_for(
+                asyncio.gather(
+                    coord.async_turn_on(wake_timeout=0.5, poll_interval=0.02),
+                    coord.async_turn_on(wake_timeout=0.5, poll_interval=0.02),
+                ),
+                timeout=1.2,
+            )
+            assert res1 is True
+            assert res2 is True
+            assert max_in_flight == 1
+            assert power_keys == [KEYCODE_POWER]
+            assert awake is True
+
+            # 3) Subsequent turn_off proceeds cleanly
+            off_ok = await asyncio.wait_for(coord.async_turn_off(), timeout=0.8)
+            assert off_ok is True
+            assert awake is False
+    finally:
+        await coord.async_shutdown()
