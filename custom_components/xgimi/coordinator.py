@@ -40,6 +40,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=10)
+DEFAULT_SHUTDOWN_SETTLE_TIMEOUT: float = 35.0
 
 # Compound one-liner executed once per poll cycle over the pooled ADB connection
 POLL_SHELL_COMMAND = (
@@ -449,6 +450,8 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
 
         self._power_lock = asyncio.Lock()
         self._power_transition_until: float = 0.0
+        self._shutdown_settle_duration: float = DEFAULT_SHUTDOWN_SETTLE_TIMEOUT
+        self._shutdown_settle_until: float = 0.0
         self._optimistic_awake: bool | None = None
         self._power_on_pending: bool = False
         self._current_input_source: str | None = INPUT_SOURCE_APPS
@@ -536,6 +539,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
         wake_timeout: float = 30.0,
         poll_interval: float = 1.5,
         power_on_settle_timeout: float = 8.0,
+        shutdown_settle_timeout: float | None = None,
     ) -> bool:
         """Execute two-stage wake: Stage 1 WoWLAN burst followed by Stage 2 ADB display ignition."""
         async with self._power_lock:
@@ -559,6 +563,29 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                 self.async_set_updated_data(current)
 
             try:
+                # 0. Quick pre-check: if projector is already recorded as awake and no power transition is pending
+                if (
+                    self.data
+                    and self.data.get("awake") is True
+                    and not self._power_off_pending
+                    and not self._power_on_pending
+                    and time.monotonic() >= self._shutdown_settle_until
+                ):
+                    try:
+                        quick_state = await self._async_read_wakefulness(timeout=1.0)
+                        last_adb_reachable = True
+                        last_observed_wakefulness = quick_state
+                        if quick_state is True:
+                            _LOGGER.info(
+                                "[%s] [+%.2fs] Quick pre-check: projector is already awake",
+                                self.host,
+                                time.monotonic() - start_time,
+                            )
+                            return True
+                    except (AdbError, TimeoutError, OSError):
+                        last_adb_reachable = False
+                        last_observed_wakefulness = None
+
                 # 1. Fast check if already awake from a recent confirmed power transition
                 now = time.monotonic()
                 if now < self._power_transition_until and self._optimistic_awake is True:
@@ -587,26 +614,36 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                     self._optimistic_awake = None
                     self._power_transition_until = 0.0
 
-                # 2. Check if power-off request was recently executed; wait for hardware to settle
-                shutdown_pending = self._power_off_pending
+                # 2. Check if power-off request was recently executed; wait for hardware shutdown cooldown
+                shutdown_pending = self._power_off_pending or time.monotonic() < self._shutdown_settle_until
                 settled_to_standby = False
-                settle_deadline = min(self._power_transition_until, deadline)
+                settle_deadline = deadline
 
                 if shutdown_pending:
-                    settled = False
+                    cooldown_target = max(self._shutdown_settle_until, self._power_transition_until)
+                    remaining = max(0.0, cooldown_target - time.monotonic())
+                    if shutdown_settle_timeout is not None:
+                        effective_cooldown = min(remaining, shutdown_settle_timeout)
+                    elif wake_timeout < 10.0:
+                        effective_cooldown = min(remaining, wake_timeout * 0.4)
+                    else:
+                        effective_cooldown = remaining
+
+                    cooldown_deadline = time.monotonic() + effective_cooldown
+                    settle_deadline = cooldown_deadline
                     consecutive_errors = 0
                     _LOGGER.info(
-                        "[%s] [+%.2fs] Shutdown pending; waiting up to %.2fs for hardware to settle to standby",
+                        "[%s] [+%.2fs] Shutdown cooldown active; waiting up to %.2fs for hardware to settle",
                         self.host,
                         time.monotonic() - start_time,
-                        max(0.0, settle_deadline - time.monotonic()),
+                        effective_cooldown,
                     )
-                    while time.monotonic() < settle_deadline:
-                        rem_settle = settle_deadline - time.monotonic()
-                        if rem_settle <= 0:
+                    while time.monotonic() < cooldown_deadline:
+                        rem_cooldown = cooldown_deadline - time.monotonic()
+                        if rem_cooldown <= 0:
                             break
                         try:
-                            settle_state = await self._async_read_wakefulness(timeout=min(2.0, max(0.01, rem_settle)))
+                            settle_state = await self._async_read_wakefulness(timeout=min(2.0, max(0.01, rem_cooldown)))
                             last_adb_reachable = True
                             last_observed_wakefulness = settle_state
                             _LOGGER.debug(
@@ -619,9 +656,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                             )
                             consecutive_errors = 0
                             if settle_state is False:
-                                settled = True
                                 settled_to_standby = True
-                                break
                         except (AdbError, TimeoutError, OSError) as err:
                             last_adb_reachable = False
                             last_observed_wakefulness = None
@@ -635,28 +670,27 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                                 err,
                             )
                             if consecutive_errors >= 3:
-                                break
-                        if time.monotonic() >= settle_deadline:
+                                settled_to_standby = True
+
+                        if time.monotonic() >= cooldown_deadline:
                             break
-                        sleep_time = min(0.2, poll_interval, max(0.001, settle_deadline - time.monotonic()))
+                        sleep_time = min(0.2, poll_interval, max(0.001, cooldown_deadline - time.monotonic()))
                         await asyncio.sleep(sleep_time)
 
-                    if not settled:
-                        if time.monotonic() >= deadline:
-                            _LOGGER.warning(
-                                "[%s] [+%.2fs] Timed out waiting for projector %s to settle into standby before waking",
-                                self.host,
-                                time.monotonic() - start_time,
-                                self.host,
-                            )
-                            _record_wake_failure()
-                            return False
-                        if time.monotonic() >= settle_deadline:
-                            settled = True
+                    if not settled_to_standby:
+                        _LOGGER.warning(
+                            "[%s] [+%.2fs] Timed out waiting for projector %s to settle into standby before waking",
+                            self.host,
+                            time.monotonic() - start_time,
+                            self.host,
+                        )
+                        _record_wake_failure()
+                        return False
 
-                    if settled_to_standby or time.monotonic() >= settle_deadline:
-                        self._optimistic_awake = None
-                        self._power_transition_until = 0.0
+                    self._optimistic_awake = None
+                    self._power_transition_until = 0.0
+                    self._shutdown_settle_until = 0.0
+                    deadline = time.monotonic() + wake_timeout
 
                 attempt = 0
                 wake_key_sent = False
@@ -990,11 +1024,15 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                 with contextlib.suppress(AdbError, TimeoutError, OSError):
                     recheck = await self._async_read_wakefulness(timeout=3.0)
                     if recheck is False:
+                        self._shutdown_settle_until = time.monotonic() + self._shutdown_settle_duration
                         self._mark_power_transition(awake=False)
+                        self._power_transition_until = max(self._power_transition_until, self._shutdown_settle_until)
                         return True
                 return False
 
+            self._shutdown_settle_until = time.monotonic() + self._shutdown_settle_duration
             self._mark_power_transition(awake=False)
+            self._power_transition_until = max(self._power_transition_until, self._shutdown_settle_until)
             return True
 
     def _mark_power_transition(self, *, awake: bool) -> None:
@@ -1148,6 +1186,10 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
 
     async def _async_update_data(self) -> XgimiCoordinatorData:
         """Poll projector state via a single compound ADB shell command."""
+        if self._power_lock.locked():
+            _LOGGER.debug("[%s] Power transition in progress; skipping background poll", self.host)
+            return self.data if self.data else self.default_state()
+
         if not self.mac:
             arp_mac = await self.hass.async_add_executor_job(resolve_mac_from_arp, self.host)
             if arp_mac:

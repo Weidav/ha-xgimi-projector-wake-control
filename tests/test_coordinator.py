@@ -1863,3 +1863,139 @@ async def test_regression_concurrent_power_requests_serialization_and_recovery()
             assert awake is False
     finally:
         await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_regression_turn_off_then_immediate_turn_on_respects_shutdown_cooldown() -> None:
+    """Verify immediate turn_on after turn_off waits for shutdown cooldown before sending wake keys."""
+    awake = True
+    start = time.monotonic()
+    key_events: list[tuple[float, int]] = []
+    wowlan_events: list[float] = []
+
+    async def shell(command: str, **kwargs: object) -> str:
+        # Dumpsys power reports Asleep almost immediately during teardown on real hardware
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake
+        t = time.monotonic() - start
+        key_events.append((t, keycode))
+        if keycode == KEYCODE_POWER:
+            awake = False
+        elif keycode == KEYCODE_WAKEUP:
+            awake = True
+
+    async def fake_wowlan() -> None:
+        wowlan_events.append(time.monotonic() - start)
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        # 1. Turn off sets ~35s shutdown cooldown
+        assert await coord.async_turn_off() is True
+        assert awake is False
+        assert len(key_events) == 1
+        assert key_events[0][1] == KEYCODE_POWER
+        assert coord._shutdown_settle_until >= time.monotonic() + 30.0
+
+        # 2. Immediate turn_on with shutdown_settle_timeout=0.15
+        cooldown_timeout = 0.15
+        turn_on_start = time.monotonic()
+        with patch.object(coord, "_send_wowlan_knocks", side_effect=fake_wowlan):
+            ok = await asyncio.wait_for(
+                coord.async_turn_on(
+                    wake_timeout=1.0,
+                    poll_interval=0.01,
+                    shutdown_settle_timeout=cooldown_timeout,
+                ),
+                timeout=1.5,
+            )
+
+        elapsed = time.monotonic() - turn_on_start
+        assert ok is True
+        assert elapsed >= cooldown_timeout - 0.02
+
+        # 3. Verify no wake keys (WAKEUP or POWER) were sent during the cooldown window
+        cooldown_end_rel = turn_on_start - start + cooldown_timeout - 0.02
+        wake_keys_during_cooldown = [
+            (t, k)
+            for (t, k) in key_events
+            if k in (KEYCODE_WAKEUP, KEYCODE_POWER) and t > key_events[0][0] and t < cooldown_end_rel
+        ]
+        assert wake_keys_during_cooldown == []
+
+        # 4. Verify no WoWLAN knocks were sent during the cooldown window
+        wowlan_during_cooldown = [t for t in wowlan_events if t < cooldown_end_rel]
+        assert wowlan_during_cooldown == []
+
+        # 5. After cooldown expired, wake proceeded and sent KEYCODE_WAKEUP
+        wakeup_keys = [(t, k) for (t, k) in key_events if k == KEYCODE_WAKEUP]
+        assert len(wakeup_keys) == 1
+        assert wakeup_keys[0][0] >= cooldown_end_rel
+        assert awake is True
+        assert coord.data["awake"] is True
+
+        # 6. Also verify automatic clamping for fast unit tests without shutdown_settle_timeout
+        key_events.clear()
+        wowlan_events.clear()
+        assert await coord.async_turn_off() is True
+        assert coord._shutdown_settle_until >= time.monotonic() + 30.0
+
+        clamped_turn_on_start = time.monotonic()
+        with patch.object(coord, "_send_wowlan_knocks", side_effect=fake_wowlan):
+            ok_clamped = await asyncio.wait_for(
+                coord.async_turn_on(wake_timeout=0.25, poll_interval=0.01),
+                timeout=1.0,
+            )
+        clamped_elapsed = time.monotonic() - clamped_turn_on_start
+        assert ok_clamped is True
+        # Clamped cooldown is 0.25 * 0.4 = 0.10s
+        assert clamped_elapsed >= 0.08
+        assert any(k == KEYCODE_WAKEUP for _, k in key_events)
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_turn_on_quick_precheck_skips_wowlan_when_already_awake() -> None:
+    """Verify Scenario 4: if coordinator and hardware are already awake, turn_on returns True fast without WoWLAN."""
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(return_value="mWakefulness=Awake\nDisplay Power: state=ON")
+    adb.async_send_key = AsyncMock()
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        coord.async_set_updated_data(coord.default_state(online=True, awake=True))
+        wowlan_mock = AsyncMock()
+        with patch.object(coord, "_send_wowlan_knocks", wowlan_mock):
+            ok = await coord.async_turn_on(wake_timeout=2.0)
+
+        assert ok is True
+        wowlan_mock.assert_not_called()
+        adb.async_send_key.assert_not_called()
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_skips_when_power_lock_locked() -> None:
+    """Verify background poll skips ADB shell command when power transition lock is held."""
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock()
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        coord.async_set_updated_data(coord.default_state(online=True, awake=True))
+        await coord._power_lock.acquire()
+        try:
+            data = await coord._async_update_data()
+            assert data["awake"] is True
+            adb.async_shell.assert_not_called()
+        finally:
+            coord._power_lock.release()
+    finally:
+        await coord.async_shutdown()

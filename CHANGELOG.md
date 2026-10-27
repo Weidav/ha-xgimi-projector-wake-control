@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.8] - 2026-10-27
+
+### Fixed
+- **Hardware Shutdown Cooldown Enforcement**: Track dedicated 35s hardware teardown cooldown (`_shutdown_settle_until`) after `turn_off` to prevent injecting wake keys or WoWLAN knocks while optical engine and fans cool down, protecting MediaTek WoWLAN suspend arming from cold power-off corruption.
+- **Wake Budget Post-Cooldown**: Grant full 30s wake timeout budget starting after hardware shutdown cooldown completes when waking during a recent shutdown.
+- **Background Poll Lock Contention**: Skip background coordinator polling when `_power_lock` is held, giving `async_turn_on` exclusive access to ADB and eliminating 4.5s socket lock delays.
+- **Instant Pre-Check When Already Awake**: Pre-check wakefulness before sending WoWLAN knocks if projector is already known to be `Awake`, returning in ~0.1s without spurious network traffic.
+
+---
+
 ## [0.0.7] - 2026-10-27
 
 ### Fixed
