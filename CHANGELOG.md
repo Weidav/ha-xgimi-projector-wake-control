@@ -5,17 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.0.6] - 2026-10-26
+## [0.0.6] - 2026-10-27
 
 ### Breaking Changes
 - **Binary Sensor Renamed**: Renamed entity **Connectivity** to **ADB Connectivity** with unique ID suffix `adb_connectivity` (entity ID: `binary_sensor.<name>_adb_connectivity`) to clearly reflect that it tracks active ADB daemon reachability over TCP 5555 rather than physical network link state.
 
 ### Fixed
+- **Power Switch & Wake Hardening**: Active wakefulness verification after injecting `KEYCODE_WAKEUP` and `KEYCODE_POWER` until `mWakefulness=Awake` is confirmed, preventing dropped keys during SoC resume from requiring a second power toggle.
+- **Optimistic State Verification**: Verify physical hardware wakefulness before trusting optimistic state during power turn-on.
+- **Fast Reconnect for Dead Sockets**: Split timeout budgets on cached sockets to fail fast and retry cleanly when Wi-Fi sleep silently drops TCP connections.
+- **Subnet-Directed Knock Broadcasts**: Send subnet-directed broadcasts (`x.x.x.255`) alongside limited broadcasts to reliably wake sleeping Wi-Fi interfaces across APs.
 - **Power Transition Safeguards**: Guard indeterminate wakefulness states and verify wake key dispatch.
 - **Shutdown Resilience**: Preserve pending shutdown state across arbitrary connection drops and transient ADB errors during settling.
 - **Deep Sleep Handling**: Reliably recognize sustained deep sleep and remove fragile wake loop offline flag.
 
 ### Changed
+- **Documentation**: Streamlined README to highlight wake from Optimized (Network Standby) mode and dedicated hardware controls.
 - **CI**: Bump `actions/upload-artifact` to v7 for native Node 24 support.
 
 ---
