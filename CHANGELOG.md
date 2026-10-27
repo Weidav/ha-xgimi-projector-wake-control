@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.7] - 2026-10-27
+
+### Fixed
+- **Power Transition & Settle Verification**: Track pending power-on transitions (`_power_on_pending`) and poll a dedicated settling window after `KEYCODE_POWER` to detect `Awake` without double-toggling while hardware transitions are underway.
+- **Ignored Command Recovery**: Obtain fresh post-settle `Asleep` evidence before retrying `KEYCODE_POWER`, distinguishing genuinely ignored toggles from delayed transitions.
+- **Indeterminate State Safeguards**: Inconclusive state, ADB disconnects, or empty dumpsys outputs after a power toggle no longer trigger duplicate toggles.
+- **Accurate Timeout State Reporting**: Preserve actual observed hardware state upon timeout rather than inventing optimistic `Awake` state.
+- **Timestamped Wake Diagnostics**: Added elapsed `[+%.2fs]` monotonic timestamps to all wake logs (`WoWLAN`, `KEYCODE_WAKEUP`, `KEYCODE_POWER`, and wakefulness queries) for live hardware diagnostics.
+
+---
+
 ## [0.0.6] - 2026-10-27
 
 ### Breaking Changes
