@@ -171,12 +171,13 @@ async def test_two_stage_turn_on_and_idempotent_turn_off() -> None:
     adb.async_close = AsyncMock()
 
     # Attempt 1: ADB unreachable (deep sleep)
-    # Attempt 2: ADB reachable, mWakefulness=Asleep -> sends KEYCODE_WAKEUP, rechecks Asleep -> sends KEYCODE_POWER
+    # Attempt 2: ADB reachable, mWakefulness=Asleep -> sends KEYCODE_WAKEUP, rechecks Asleep -> sends KEYCODE_POWER -> verifies Awake
     adb.async_shell = AsyncMock(
         side_effect=[
             AdbConnectionError("deep sleep"),
             "mWakefulness=Asleep",
             "mWakefulness=Asleep",
+            "mWakefulness=Awake",
         ]
     )
 
@@ -1211,6 +1212,76 @@ async def test_power_off_then_immediately_on_no_wowlan_flooding_during_settling(
         assert wowlan_mock.call_count == 1
         assert KEYCODE_WAKEUP in keys
         assert awake is True
+        assert coord.data["awake"] is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_turn_on_retries_when_first_wake_keys_dropped_by_waking_soc() -> None:
+    """Verify turn_on does not return early if the first KEYCODE_WAKEUP/KEYCODE_POWER is ignored while waking."""
+    awake = False
+    power_key_attempts = 0
+    keys: list[int] = []
+
+    async def shell(command: str, **kwargs: object) -> str:
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake, power_key_attempts
+        keys.append(keycode)
+        if keycode == KEYCODE_POWER:
+            power_key_attempts += 1
+            # First KEYCODE_POWER is ignored by waking SoC; second attempt wakes the projector
+            if power_key_attempts >= 2:
+                awake = True
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            assert await coord.async_turn_on(wake_timeout=2.0, poll_interval=0.02) is True
+
+        assert power_key_attempts == 2
+        assert awake is True
+        assert coord.data["awake"] is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_turn_on_verifies_hardware_when_optimistic_awake_is_set() -> None:
+    """Verify turn_on checks actual hardware wakefulness instead of blindly trusting _optimistic_awake."""
+    awake = False
+    keys: list[int] = []
+
+    async def shell(command: str, **kwargs: object) -> str:
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake
+        keys.append(keycode)
+        if keycode in (KEYCODE_WAKEUP, KEYCODE_POWER):
+            awake = True
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        # Simulate stale optimistic awake state while hardware is actually still Asleep
+        coord._optimistic_awake = True
+        coord._power_transition_until = time.monotonic() + 10.0
+
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            assert await coord.async_turn_on(wake_timeout=2.0, poll_interval=0.02) is True
+
+        assert awake is True
+        assert KEYCODE_WAKEUP in keys
         assert coord.data["awake"] is True
     finally:
         await coord.async_shutdown()

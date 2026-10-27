@@ -451,22 +451,23 @@ class XgimiAdbClient:
                 had_existing_conn = self._writer is not None
                 try:
                     rem = max(0.01, deadline - time.monotonic())
-                    return await self._run_shell_stream_locked(command, timeout=rem)
+                    first_timeout = (
+                        min(rem, max(0.8, rem * 0.5)) if (had_existing_conn and should_retry and rem >= 1.6) else rem
+                    )
+                    return await self._run_shell_stream_locked(command, timeout=first_timeout)
                 except AdbAuthError:
                     await self._close_transport_locked()
                     raise
                 except (TimeoutError, OSError, asyncio.IncompleteReadError, AdbError) as err:
                     await self._close_transport_locked()
-                    if isinstance(err, TimeoutError):
-                        raise
                     if not had_existing_conn or not should_retry:
-                        if isinstance(err, AdbError):
+                        if isinstance(err, (AdbError, TimeoutError)):
                             raise
                         raise AdbConnectionError(f"ADB shell command failed on {self.host}:{self.port}: {err}") from err
                     try:
                         rem = deadline - time.monotonic()
                         if rem <= 0:
-                            raise TimeoutError(f"Timed out before ADB retry for {command}")
+                            raise TimeoutError(f"Timed out before ADB retry for {command}") from err
                         return await self._run_shell_stream_locked(command, timeout=rem)
                     except AdbAuthError:
                         await self._close_transport_locked()
@@ -489,7 +490,22 @@ class XgimiAdbClient:
         """Inject an Android keycode over the pooled ADB connection."""
         if type(keycode) is not int or not (0 <= keycode <= 1000):
             raise ValueError(f"Invalid Android keycode: {keycode}")
-        await self.async_shell(f"input keyevent {keycode}", timeout=timeout, retry=False)
+        out = await self.async_shell(f"input keyevent {keycode}", timeout=timeout, retry=False)
+        if out and any(
+            err in out.lower()
+            for err in (
+                "error",
+                "failure",
+                "failed",
+                "exception",
+                "can't find service",
+                "permission denied",
+                "broken pipe",
+                "killed",
+                "segmentation fault",
+            )
+        ):
+            raise AdbError(f"Android rejected keycode {keycode}: {out}")
 
     def close_transport_nowait(self) -> None:
         """Close the cached writer without awaiting."""

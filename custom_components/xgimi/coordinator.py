@@ -265,11 +265,19 @@ def send_udp_knock(host: str, port: int, payload: bytes = b"\x00", repeat: int =
 
     # Also send broadcast UDP for IPv4 to bypass stale ARP tables on sleeping targets
     if not is_ipv6 and clean_host != "255.255.255.255":
+        broadcast_targets = ["255.255.255.255"]
+        parts = clean_host.split(".")
+        if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+            subnet_bcast = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+            if subnet_bcast not in (clean_host, "255.255.255.255"):
+                broadcast_targets.append(subnet_bcast)
         with contextlib.suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as b_sock:
             b_sock.setblocking(False)
             b_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            for _ in range(repeat):
-                b_sock.sendto(payload, ("255.255.255.255", port))
+            for bcast_ip in broadcast_targets:
+                for _ in range(repeat):
+                    with contextlib.suppress(OSError):
+                        b_sock.sendto(payload, (bcast_ip, port))
 
 
 def send_mdns_knock(host: str) -> None:
@@ -519,14 +527,18 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
     async def async_turn_on(
         self,
         *,
-        wake_timeout: float = 24.0,
+        wake_timeout: float = 30.0,
         poll_interval: float = 1.5,
     ) -> bool:
         """Execute two-stage wake: Stage 1 WoWLAN burst followed by Stage 2 ADB display ignition."""
         async with self._power_lock:
             now = time.monotonic()
             if now < self._power_transition_until and self._optimistic_awake is True:
-                return True
+                with contextlib.suppress(AdbError, TimeoutError, OSError):
+                    if await self._async_read_wakefulness(timeout=2.0) is True:
+                        return True
+                self._optimistic_awake = None
+                self._power_transition_until = 0.0
 
             deadline = time.monotonic() + wake_timeout
 
@@ -607,12 +619,20 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                     # Stage 2: SoC is awake and adbd responded; send idempotent KEYCODE_WAKEUP first
                     await self.adb.async_send_key(KEYCODE_WAKEUP, timeout=3.0)
                     wake_key_sent = True
-                    await asyncio.sleep(min(0.4, poll_interval / 2))
+                    await asyncio.sleep(min(0.6, poll_interval / 2))
                     recheck = await self._async_read_wakefulness(timeout=2.5)
+                    if recheck is True:
+                        self._mark_power_transition(awake=True)
+                        return True
+
                     if recheck is False:
                         await self.adb.async_send_key(KEYCODE_POWER, timeout=3.0)
-                    self._mark_power_transition(awake=True)
-                    return True
+                        for _ in range(3):
+                            await asyncio.sleep(min(0.6, poll_interval / 2))
+                            post_power = await self._async_read_wakefulness(timeout=2.5)
+                            if post_power is True:
+                                self._mark_power_transition(awake=True)
+                                return True
                 except (AdbError, TimeoutError, OSError) as err:
                     _LOGGER.debug(
                         "Stage-2 ADB wake poll attempt %d for %s pending: %s",
