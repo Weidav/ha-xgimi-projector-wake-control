@@ -450,6 +450,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
         self._power_lock = asyncio.Lock()
         self._power_transition_until: float = 0.0
         self._optimistic_awake: bool | None = None
+        self._power_on_pending: bool = False
         self._current_input_source: str | None = INPUT_SOURCE_APPS
         self._hdmi_input_ids: dict[str, str] = dict(DEFAULT_HDMI_INPUT_IDS)
         self._hdmi_discovered: bool = False
@@ -524,139 +525,367 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
             await asyncio.sleep(delay)
             await self.async_request_refresh()
 
+    @property
+    def _power_off_pending(self) -> bool:
+        """Return True if a power-off transition is currently pending."""
+        return self._optimistic_awake is False and time.monotonic() < self._power_transition_until
+
     async def async_turn_on(
         self,
         *,
         wake_timeout: float = 30.0,
         poll_interval: float = 1.5,
+        power_on_settle_timeout: float = 3.0,
     ) -> bool:
         """Execute two-stage wake: Stage 1 WoWLAN burst followed by Stage 2 ADB display ignition."""
         async with self._power_lock:
-            now = time.monotonic()
-            if now < self._power_transition_until and self._optimistic_awake is True:
-                with contextlib.suppress(AdbError, TimeoutError, OSError):
-                    if await self._async_read_wakefulness(timeout=2.0) is True:
-                        return True
-                self._optimistic_awake = None
-                self._power_transition_until = 0.0
+            start_time = time.monotonic()
+            deadline = start_time + wake_timeout
+            self._power_on_pending = False
+            last_observed_wakefulness: bool | None = None
 
-            deadline = time.monotonic() + wake_timeout
-
-            # Off request recently executed: wait for hardware to settle into standby before waking
-            shutdown_pending = now < self._power_transition_until and self._optimistic_awake is False
-            settled_to_standby = False
-            settle_deadline = min(self._power_transition_until, deadline)
-
-            if shutdown_pending:
-                settled = False
-                consecutive_errors = 0
-                while time.monotonic() < settle_deadline:
-                    rem_settle = max(0.01, settle_deadline - time.monotonic())
-                    try:
-                        settle_state = await self._async_read_wakefulness(timeout=min(2.0, rem_settle))
-                        consecutive_errors = 0
-                        if settle_state is False:
-                            settled = True
-                            settled_to_standby = True
-                            break
-                    except (AdbError, TimeoutError, OSError) as err:
-                        consecutive_errors += 1
+            try:
+                # 1. Fast check if already awake from a recent confirmed power transition
+                now = time.monotonic()
+                if now < self._power_transition_until and self._optimistic_awake is True:
+                    with contextlib.suppress(AdbError, TimeoutError, OSError):
+                        fresh = await self._async_read_wakefulness(timeout=2.0)
+                        last_observed_wakefulness = fresh
                         _LOGGER.debug(
-                            "Transient ADB error during standby settle poll for %s (consecutive=%d): %s",
+                            "[%s] [+%.2fs] Read wakefulness during active power transition: %s",
                             self.host,
-                            consecutive_errors,
-                            err,
+                            time.monotonic() - start_time,
+                            "Awake" if fresh is True else ("Asleep" if fresh is False else "None/indeterminate"),
                         )
-                        if consecutive_errors >= 3:
-                            # Connection lost during settling: break to Stage 1 wake loop without confirming power state
-                            break
-                    sleep_time = min(0.2, poll_interval, max(0.001, settle_deadline - time.monotonic()))
-                    await asyncio.sleep(sleep_time)
-
-                if not settled:
-                    if time.monotonic() >= deadline:
-                        _LOGGER.warning(
-                            "Timed out waiting for XGIMI projector %s to settle into standby before waking",
-                            self.host,
-                        )
-                        return False
-                    if time.monotonic() >= settle_deadline:
-                        # 10s power transition window elapsed; device remained awake
-                        settled = True
-
-                if settled_to_standby or time.monotonic() >= settle_deadline:
+                        if fresh is True:
+                            _LOGGER.info(
+                                "[%s] [+%.2fs] Projector is already awake from recent power transition",
+                                self.host,
+                                time.monotonic() - start_time,
+                            )
+                            return True
                     self._optimistic_awake = None
                     self._power_transition_until = 0.0
 
-            attempt = 0
-            wake_key_sent = False
+                # 2. Check if power-off request was recently executed; wait for hardware to settle
+                shutdown_pending = self._power_off_pending
+                settled_to_standby = False
+                settle_deadline = min(self._power_transition_until, deadline)
 
-            while True:
-                if attempt % 2 == 0:
-                    await self._send_wowlan_knocks()
-                attempt += 1
+                if shutdown_pending:
+                    settled = False
+                    consecutive_errors = 0
+                    _LOGGER.info(
+                        "[%s] [+%.2fs] Shutdown pending; waiting up to %.2fs for hardware to settle to standby",
+                        self.host,
+                        time.monotonic() - start_time,
+                        max(0.0, settle_deadline - time.monotonic()),
+                    )
+                    while time.monotonic() < settle_deadline:
+                        rem_settle = max(0.01, settle_deadline - time.monotonic())
+                        try:
+                            settle_state = await self._async_read_wakefulness(timeout=min(2.0, rem_settle))
+                            last_observed_wakefulness = settle_state
+                            _LOGGER.debug(
+                                "[%s] [+%.2fs] Standby settle poll wakefulness: %s",
+                                self.host,
+                                time.monotonic() - start_time,
+                                "Awake"
+                                if settle_state is True
+                                else ("Asleep" if settle_state is False else "None/indeterminate"),
+                            )
+                            consecutive_errors = 0
+                            if settle_state is False:
+                                settled = True
+                                settled_to_standby = True
+                                break
+                        except (AdbError, TimeoutError, OSError) as err:
+                            last_observed_wakefulness = None
+                            consecutive_errors += 1
+                            _LOGGER.debug(
+                                "[%s] [+%.2fs] Transient ADB error during standby settle poll (consecutive=%d): %s (%s)",
+                                self.host,
+                                time.monotonic() - start_time,
+                                consecutive_errors,
+                                type(err).__name__,
+                                err,
+                            )
+                            if consecutive_errors >= 3:
+                                break
+                        sleep_time = min(0.2, poll_interval, max(0.001, settle_deadline - time.monotonic()))
+                        await asyncio.sleep(sleep_time)
 
-                try:
-                    awake = await self._async_read_wakefulness(timeout=2.5)
+                    if not settled:
+                        if time.monotonic() >= deadline:
+                            _LOGGER.warning(
+                                "[%s] [+%.2fs] Timed out waiting for projector %s to settle into standby before waking",
+                                self.host,
+                                time.monotonic() - start_time,
+                                self.host,
+                            )
+                            return False
+                        if time.monotonic() >= settle_deadline:
+                            settled = True
+
+                    if settled_to_standby or time.monotonic() >= settle_deadline:
+                        self._optimistic_awake = None
+                        self._power_transition_until = 0.0
+
+                attempt = 0
+                wake_key_sent = False
+                power_toggle_sent = False
+                power_toggle_count = 0
+
+                effective_settle_duration = min(
+                    power_on_settle_timeout,
+                    max(poll_interval * 2, wake_timeout * 0.2),
+                )
+
+                while True:
+                    if attempt % 2 == 0:
+                        _LOGGER.info(
+                            "[%s] [+%.2fs] Sending Stage 1 WoWLAN knock burst (burst %d)",
+                            self.host,
+                            time.monotonic() - start_time,
+                            (attempt // 2) + 1,
+                        )
+                        await self._send_wowlan_knocks()
+                    attempt += 1
+
+                    try:
+                        rem_deadline = max(0.01, deadline - time.monotonic())
+                        awake = await self._async_read_wakefulness(timeout=min(2.5, rem_deadline))
+                        last_observed_wakefulness = awake
+                        _LOGGER.debug(
+                            "[%s] [+%.2fs] Stage 2 wake poll wakefulness: %s (attempt %d)",
+                            self.host,
+                            time.monotonic() - start_time,
+                            "Awake" if awake is True else ("Asleep" if awake is False else "None/indeterminate"),
+                            attempt,
+                        )
+                    except (AdbError, TimeoutError, OSError) as err:
+                        awake = None
+                        last_observed_wakefulness = None
+                        _LOGGER.debug(
+                            "[%s] [+%.2fs] Stage 2 wake poll ADB error (attempt %d): %s (%s)",
+                            self.host,
+                            time.monotonic() - start_time,
+                            attempt,
+                            type(err).__name__,
+                            err,
+                        )
+
+                    # Handle lingering shutdown settling if device is still shutting down
                     if shutdown_pending and not settled_to_standby and not wake_key_sent:
                         if awake is False:
                             settled_to_standby = True
                         elif time.monotonic() < settle_deadline:
-                            # Pre-off Awake or indeterminate state: hardware is still finishing shutdown.
-                            # Continue waiting for hardware to reach standby or settle deadline.
                             sleep_time = min(0.2, poll_interval, max(0.001, settle_deadline - time.monotonic()))
                             await asyncio.sleep(sleep_time)
                             attempt = 1
                             continue
 
+                    # If awake confirmed: success!
                     if awake is True:
+                        _LOGGER.info(
+                            "[%s] [+%.2fs] Wake confirmed: projector is Awake",
+                            self.host,
+                            time.monotonic() - start_time,
+                        )
                         self._mark_power_transition(awake=True)
                         return True
 
                     if awake is False:
                         settled_to_standby = True
 
-                    # Stage 2: SoC is awake and adbd responded; send idempotent KEYCODE_WAKEUP first
-                    await self.adb.async_send_key(KEYCODE_WAKEUP, timeout=3.0)
-                    wake_key_sent = True
-                    await asyncio.sleep(min(0.6, poll_interval / 2))
-                    recheck = await self._async_read_wakefulness(timeout=2.5)
-                    if recheck is True:
-                        self._mark_power_transition(awake=True)
-                        return True
+                    # If power toggle was previously sent and state is still indeterminate:
+                    # NEVER send another KEYCODE_POWER toggle without fresh positive Asleep evidence!
+                    if power_toggle_sent:
+                        if awake is False:
+                            # Fresh positive Asleep evidence arrived after settle window!
+                            _LOGGER.info(
+                                "[%s] [+%.2fs] Previous KEYCODE_POWER was ignored (projector still Asleep); retry allowed",
+                                self.host,
+                                time.monotonic() - start_time,
+                            )
+                            power_toggle_sent = False
+                            self._power_on_pending = False
+                        else:
+                            # State is still indeterminate (None) or ADB unreachable.
+                            # Safe to send idempotent KEYCODE_WAKEUP, but do NOT send KEYCODE_POWER toggle!
+                            _LOGGER.debug(
+                                "[%s] [+%.2fs] Power transition pending or state indeterminate (%s); skipping KEYCODE_POWER toggle",
+                                self.host,
+                                time.monotonic() - start_time,
+                                "None" if awake is None else str(awake),
+                            )
+                            with contextlib.suppress(AdbError, TimeoutError, OSError):
+                                await self.adb.async_send_key(
+                                    KEYCODE_WAKEUP,
+                                    timeout=min(3.0, max(0.01, deadline - time.monotonic())),
+                                )
+                            sleep_time = min(poll_interval, max(0.001, deadline - time.monotonic()))
+                            await asyncio.sleep(sleep_time)
+                            continue
 
-                    if recheck is False:
-                        await self.adb.async_send_key(KEYCODE_POWER, timeout=3.0)
-                        for _ in range(3):
-                            await asyncio.sleep(min(0.6, poll_interval / 2))
-                            post_power = await self._async_read_wakefulness(timeout=2.5)
-                            if post_power is True:
+                    # State is confirmed Asleep (awake is False) and no power toggle is pending:
+                    if awake is False:
+                        # 1. Send idempotent KEYCODE_WAKEUP first
+                        try:
+                            _LOGGER.info(
+                                "[%s] [+%.2fs] Sending idempotent KEYCODE_WAKEUP",
+                                self.host,
+                                time.monotonic() - start_time,
+                            )
+                            rem_cmd = max(0.01, deadline - time.monotonic())
+                            await self.adb.async_send_key(KEYCODE_WAKEUP, timeout=min(3.0, rem_cmd))
+                            wake_key_sent = True
+                        except (AdbError, TimeoutError, OSError) as err:
+                            _LOGGER.debug(
+                                "[%s] [+%.2fs] KEYCODE_WAKEUP send failed: %s (%s)",
+                                self.host,
+                                time.monotonic() - start_time,
+                                type(err).__name__,
+                                err,
+                            )
+                            sleep_time = min(poll_interval, max(0.001, deadline - time.monotonic()))
+                            await asyncio.sleep(sleep_time)
+                            continue
+
+                        # Check if KEYCODE_WAKEUP woke the device
+                        await asyncio.sleep(min(0.6, poll_interval / 2))
+                        try:
+                            rem_recheck = max(0.01, deadline - time.monotonic())
+                            recheck = await self._async_read_wakefulness(timeout=min(2.5, rem_recheck))
+                            last_observed_wakefulness = recheck
+                            _LOGGER.debug(
+                                "[%s] [+%.2fs] Post-WAKEUP wakefulness read: %s",
+                                self.host,
+                                time.monotonic() - start_time,
+                                "Awake"
+                                if recheck is True
+                                else ("Asleep" if recheck is False else "None/indeterminate"),
+                            )
+                            if recheck is True:
+                                _LOGGER.info(
+                                    "[%s] [+%.2fs] Wake confirmed after KEYCODE_WAKEUP: projector is Awake",
+                                    self.host,
+                                    time.monotonic() - start_time,
+                                )
                                 self._mark_power_transition(awake=True)
                                 return True
-                except (AdbError, TimeoutError, OSError) as err:
-                    _LOGGER.debug(
-                        "Stage-2 ADB wake poll attempt %d for %s pending: %s",
-                        attempt,
-                        self.host,
-                        err,
-                    )
+                        except (AdbError, TimeoutError, OSError) as err:
+                            recheck = None
+                            last_observed_wakefulness = None
+                            _LOGGER.debug(
+                                "[%s] [+%.2fs] Post-WAKEUP wakefulness check failed: %s (%s)",
+                                self.host,
+                                time.monotonic() - start_time,
+                                type(err).__name__,
+                                err,
+                            )
 
-                if time.monotonic() >= deadline:
-                    break
-                await asyncio.sleep(poll_interval)
+                        # If recheck is confirmed False (Asleep), KEYCODE_WAKEUP was insufficient.
+                        # Send KEYCODE_POWER toggle and enter the power-on settle window.
+                        if recheck is False:
+                            power_toggle_count += 1
+                            _LOGGER.info(
+                                "[%s] [+%.2fs] Sending KEYCODE_POWER toggle (attempt %d)",
+                                self.host,
+                                time.monotonic() - start_time,
+                                power_toggle_count,
+                            )
+                            power_toggle_sent = True
+                            self._power_on_pending = True
+                            last_observed_wakefulness = None
+                            try:
+                                rem_pwr = max(0.01, deadline - time.monotonic())
+                                await self.adb.async_send_key(KEYCODE_POWER, timeout=min(3.0, rem_pwr))
+                            except (AdbError, TimeoutError, OSError) as err:
+                                _LOGGER.debug(
+                                    "[%s] [+%.2fs] KEYCODE_POWER send encountered error (key may have been delivered): %s (%s)",
+                                    self.host,
+                                    time.monotonic() - start_time,
+                                    type(err).__name__,
+                                    err,
+                                )
 
-            _LOGGER.warning("Timed out waiting for XGIMI projector %s to wake", self.host)
-            return False
+                            # Poll across the settling window to detect Awake early
+                            toggle_settle_deadline = min(deadline, time.monotonic() + effective_settle_duration)
+                            settle_interval = min(0.5, max(0.005, poll_interval / 2))
+                            while time.monotonic() < toggle_settle_deadline:
+                                sleep_sub = min(settle_interval, max(0.001, toggle_settle_deadline - time.monotonic()))
+                                await asyncio.sleep(sleep_sub)
+                                try:
+                                    rem_settle_poll = max(0.01, deadline - time.monotonic())
+                                    post_power = await self._async_read_wakefulness(timeout=min(2.5, rem_settle_poll))
+                                    last_observed_wakefulness = post_power
+                                    _LOGGER.debug(
+                                        "[%s] [+%.2fs] Power toggle settle poll: %s",
+                                        self.host,
+                                        time.monotonic() - start_time,
+                                        "Awake"
+                                        if post_power is True
+                                        else ("Asleep" if post_power is False else "None/indeterminate"),
+                                    )
+                                    if post_power is True:
+                                        _LOGGER.info(
+                                            "[%s] [+%.2fs] Wake confirmed after KEYCODE_POWER: projector is Awake",
+                                            self.host,
+                                            time.monotonic() - start_time,
+                                        )
+                                        self._mark_power_transition(awake=True)
+                                        return True
+                                except (AdbError, TimeoutError, OSError) as err:
+                                    last_observed_wakefulness = None
+                                    _LOGGER.debug(
+                                        "[%s] [+%.2fs] Power toggle settle poll error: %s (%s)",
+                                        self.host,
+                                        time.monotonic() - start_time,
+                                        type(err).__name__,
+                                        err,
+                                    )
+
+                            if time.monotonic() >= deadline:
+                                break
+                            # Settle window has elapsed; loop immediately to obtain fresh post-settle state evidence
+                            continue
+
+                    if time.monotonic() >= deadline:
+                        break
+                    sleep_time = min(poll_interval, max(0.001, deadline - time.monotonic()))
+                    await asyncio.sleep(sleep_time)
+
+                _LOGGER.warning(
+                    "[%s] [+%.2fs] Timed out waiting for XGIMI projector %s to wake (final_state=%s)",
+                    self.host,
+                    time.monotonic() - start_time,
+                    self.host,
+                    "Awake"
+                    if last_observed_wakefulness is True
+                    else ("Asleep" if last_observed_wakefulness is False else "None/indeterminate"),
+                )
+                if self.data:
+                    current: XgimiCoordinatorData = {
+                        **self.data,
+                        "online": last_observed_wakefulness is not None,
+                        "awake": last_observed_wakefulness,
+                    }
+                    self.async_set_updated_data(current)
+                return False
+
+            finally:
+                self._power_on_pending = False
 
     async def async_turn_off(self) -> bool:
         """Idempotently put the projector into standby after verifying it is currently Awake."""
         async with self._power_lock:
             now = time.monotonic()
-            if now < self._power_transition_until and self._optimistic_awake is False:
+            if self._power_off_pending:
                 return True
 
             # On request recently executed: wait for hardware to finish waking before turning off
-            if now < self._power_transition_until and self._optimistic_awake is True:
+            if self._power_on_pending or (now < self._power_transition_until and self._optimistic_awake is True):
                 settle_deadline = min(self._power_transition_until, time.monotonic() + 10.0)
                 while time.monotonic() < settle_deadline:
                     rem_settle = max(0.01, settle_deadline - time.monotonic())
@@ -704,6 +933,7 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
 
     def _mark_power_transition(self, *, awake: bool) -> None:
         """Set optimistic state during a 10s hardware transition window and schedule refreshes."""
+        self._power_on_pending = False
         self._optimistic_awake = awake
         self._power_transition_until = time.monotonic() + 10.0
         base = self.data if self.data else self.default_state(online=True, awake=awake)

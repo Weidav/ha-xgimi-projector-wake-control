@@ -1285,3 +1285,223 @@ async def test_turn_on_verifies_hardware_when_optimistic_awake_is_set() -> None:
         assert coord.data["awake"] is True
     finally:
         await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_turn_on_ignored_power_toggle_retried_and_succeeds() -> None:
+    """Verify genuinely ignored KEYCODE_POWER retries after settle window and succeeds."""
+    awake = False
+    power_key_attempts = 0
+    keys: list[int] = []
+
+    async def shell(command: str, **kwargs: object) -> str:
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake, power_key_attempts
+        keys.append(keycode)
+        if keycode == KEYCODE_POWER:
+            power_key_attempts += 1
+            # First KEYCODE_POWER is genuinely ignored by hardware; second attempt wakes device
+            if power_key_attempts >= 2:
+                awake = True
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            assert await coord.async_turn_on(wake_timeout=2.0, poll_interval=0.02, power_on_settle_timeout=0.08) is True
+
+        assert power_key_attempts == 2
+        assert awake is True
+        assert coord.data["awake"] is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_turn_on_delayed_transition_does_not_double_toggle() -> None:
+    """Verify delayed wake transition over multiple settle polls does not trigger second KEYCODE_POWER."""
+    poll_count_after_power = 0
+    awake = False
+    power_keys: list[int] = []
+
+    async def shell(command: str, **kwargs: object) -> str:
+        nonlocal poll_count_after_power, awake
+        if power_keys:
+            poll_count_after_power += 1
+            # Device takes 3 settle polls to transition from Asleep to Awake
+            if poll_count_after_power >= 3:
+                awake = True
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        if keycode == KEYCODE_POWER:
+            power_keys.append(keycode)
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            assert await coord.async_turn_on(wake_timeout=2.0, poll_interval=0.02, power_on_settle_timeout=0.2) is True
+
+        # Exactly 1 KEYCODE_POWER must be sent (no double toggle)
+        assert len(power_keys) == 1
+        assert poll_count_after_power >= 3
+        assert awake is True
+        assert coord.data["awake"] is True
+        assert coord.data["online"] is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_turn_on_transient_adb_error_after_power_toggle_does_not_double_toggle() -> None:
+    """Verify indeterminate state (None/error) after KEYCODE_POWER does not trigger another toggle."""
+    awake = False
+    power_keys: list[int] = []
+    error_injected_count = 0
+
+    async def shell(command: str, **kwargs: object) -> str:
+        nonlocal error_injected_count, awake
+        if power_keys:
+            if error_injected_count < 2:
+                error_injected_count += 1
+                raise AdbConnectionError("Transient socket disconnect during display ignition")
+            if error_injected_count == 2:
+                error_injected_count += 1
+                return ""  # Indeterminate output -> returns None
+            # After indeterminate period, ADB reconnects and reports confirmed Awake
+            awake = True
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        if keycode == KEYCODE_POWER:
+            power_keys.append(keycode)
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            assert await coord.async_turn_on(wake_timeout=2.0, poll_interval=0.02, power_on_settle_timeout=0.06) is True
+
+        # Indeterminate state must NOT trigger a second toggle; exactly 1 KEYCODE_POWER sent
+        assert len(power_keys) == 1
+        assert error_injected_count >= 3
+        assert awake is True
+        assert coord.data["awake"] is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_turn_on_inconclusive_state_timeout_returns_false_and_preserves_none() -> None:
+    """Verify inconclusive state throughout timeout returns False and preserves actual state without inventing awake."""
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=AdbConnectionError("Target completely unreachable"))
+    adb.async_send_key = AsyncMock()
+
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    # Set initial coordinator state with awake=None
+    coord.data = coord.default_state(online=False, awake=None)
+
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            result = await coord.async_turn_on(wake_timeout=0.05, poll_interval=0.01)
+
+        assert result is False
+        assert coord._optimistic_awake is None
+        assert coord.data["awake"] is None
+        assert coord.data["online"] is False
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_competing_turn_on_serialized_and_no_duplicate_toggle() -> None:
+    """Verify competing turn_on requests are serialized by _power_lock and second request sees Awake."""
+    awake = False
+    power_keys: list[int] = []
+
+    async def shell(command: str, **kwargs: object) -> str:
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        nonlocal awake
+        if keycode == KEYCODE_POWER:
+            power_keys.append(keycode)
+            awake = True
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            # Fire two concurrent turn_on requests
+            res1, res2 = await asyncio.gather(
+                coord.async_turn_on(wake_timeout=2.0, poll_interval=0.02, power_on_settle_timeout=0.08),
+                coord.async_turn_on(wake_timeout=2.0, poll_interval=0.02, power_on_settle_timeout=0.08),
+            )
+
+        assert res1 is True
+        assert res2 is True
+        # KEYCODE_POWER must only be sent once; second request sees projector is Awake
+        assert len(power_keys) == 1
+        assert awake is True
+        assert coord.data["awake"] is True
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_turn_on_power_key_timeout_during_slow_transition_does_not_double_toggle() -> None:
+    """Verify a slow KEYCODE_POWER that times out while starting transition does not double-toggle."""
+    awake = False
+    power_keys: list[int] = []
+    polls_after_power = 0
+
+    async def shell(command: str, **kwargs: object) -> str:
+        nonlocal polls_after_power, awake
+        if power_keys:
+            polls_after_power += 1
+            if polls_after_power == 1:
+                # First poll during settle window still sees Asleep while transition is underway
+                return "mWakefulness=Asleep"
+            if polls_after_power == 2:
+                # Second poll hits transient indeterminate state during display ignition
+                raise TimeoutError("ADB busy during display ignition")
+            awake = True
+        return "mWakefulness=Awake" if awake else "mWakefulness=Asleep"
+
+    async def key(keycode: int, **kwargs: object) -> None:
+        if keycode == KEYCODE_POWER:
+            power_keys.append(keycode)
+            # Command reaches projector and begins transition, but ADB call times out
+            raise TimeoutError("Command response delayed")
+
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=shell)
+    adb.async_send_key = AsyncMock(side_effect=key)
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "127.0.0.1", "Test", adb_client=adb)
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            assert await coord.async_turn_on(wake_timeout=2.0, poll_interval=0.02, power_on_settle_timeout=0.05) is True
+
+        assert len(power_keys) == 1
+        assert awake is True
+        assert coord.data["awake"] is True
+    finally:
+        await coord.async_shutdown()
