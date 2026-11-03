@@ -14,7 +14,8 @@
         },
         "ghcr.io/devcontainer-community/devcontainer-features/astral.sh-uv:1": {
             "shellautocompletion": true
-        }
+        },
+        "ghcr.io/devcontainer-community/devcontainer-features/opencode.ai:1": {}
     },
     "customizations": {
         "vscode": {

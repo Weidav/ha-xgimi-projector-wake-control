@@ -5,6 +5,11 @@
       "resolved": "ghcr.io/devcontainer-community/devcontainer-features/astral.sh-uv@sha256:36f95b90080248a05aba7b1b3cecf8018bb6d7222f6274f03f050b502abd4fe7",
       "integrity": "sha256:36f95b90080248a05aba7b1b3cecf8018bb6d7222f6274f03f050b502abd4fe7"
     },
+    "ghcr.io/devcontainer-community/devcontainer-features/opencode.ai:1": {
+      "version": "1.0.7",
+      "resolved": "ghcr.io/devcontainer-community/devcontainer-features/opencode.ai@sha256:312520e651f8438c67d6823464fffaf42449e1e05e7020ef721748a4a95fa1fb",
+      "integrity": "sha256:312520e651f8438c67d6823464fffaf42449e1e05e7020ef721748a4a95fa1fb"
+    },
     "ghcr.io/devcontainers/features/common-utils:2": {
       "version": "2.7.1",
       "resolved": "ghcr.io/devcontainers/features/common-utils@sha256:e76a6a8a35d1ad824daad1540725e0ec9f8ed2dc00d2850e990a9830013c7d08",
