@@ -35,8 +35,8 @@ jobs:
           uv run ruff check custom_components/xgimi tests/
           uv run ruff format --check custom_components/xgimi tests/
 
-      - name: Run Pyright type check
-        run: uv run pyright custom_components/xgimi
+      - name: Run Pyrefly type check
+        run: uv run pyrefly check
 
       - name: Run Deptry dependency check
         run: uv run deptry custom_components/xgimi
