@@ -95,7 +95,7 @@ class XgimiEntity(CoordinatorEntity[XgimiDataUpdateCoordinator]):
         self._attr_unique_id = f"{entry_id}_{unique_suffix}"
 
     @property
-    def device_info(self) -> DeviceInfo:  # pyright: ignore[reportIncompatibleVariableOverride]
+    def device_info(self) -> DeviceInfo:
         """Return device registry information for this XGIMI projector."""
         data = self.coordinator.data or {}
         connections: set[tuple[str, str]] = set()

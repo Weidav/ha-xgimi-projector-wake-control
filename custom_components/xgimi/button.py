@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from homeassistant.components.button import (
-    ButtonDeviceClass,  # pyright: ignore[reportPrivateImportUsage]
+    ButtonDeviceClass,
     ButtonEntity,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -36,7 +36,7 @@ async def async_setup_entry(
     )
 
 
-class XgimiKeyButton(XgimiEntity, ButtonEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
+class XgimiKeyButton(XgimiEntity, ButtonEntity):
     """Button entity that injects an Android or XGIMI custom keycode over ADB."""
 
     def __init__(
@@ -59,7 +59,7 @@ class XgimiKeyButton(XgimiEntity, ButtonEntity):  # pyright: ignore[reportIncomp
             raise HomeAssistantError(f"Failed to send key '{self._attr_name}' ({self._keycode}) to projector")
 
 
-class XgimiWakeButton(XgimiEntity, ButtonEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
+class XgimiWakeButton(XgimiEntity, ButtonEntity):
     """Button entity to explicitly trigger the two-stage WoWLAN + ADB wake burst."""
 
     _attr_name = "Force Wake Projector"
@@ -75,7 +75,7 @@ class XgimiWakeButton(XgimiEntity, ButtonEntity):  # pyright: ignore[reportIncom
             raise HomeAssistantError(f"Failed to wake XGIMI projector at {self.coordinator.host}")
 
 
-class XgimiRestartButton(XgimiEntity, ButtonEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
+class XgimiRestartButton(XgimiEntity, ButtonEntity):
     """Button entity to reboot the projector via ADB shell."""
 
     _attr_name = "Restart Projector"

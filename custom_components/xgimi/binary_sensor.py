@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from homeassistant.components.binary_sensor import (
-    BinarySensorDeviceClass,  # pyright: ignore[reportPrivateImportUsage]
+    BinarySensorDeviceClass,
     BinarySensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -30,7 +30,7 @@ async def async_setup_entry(
     )
 
 
-class XgimiPowerBinarySensor(XgimiEntity, BinarySensorEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
+class XgimiPowerBinarySensor(XgimiEntity, BinarySensorEntity):
     """Binary sensor reporting whether the projector display is Awake."""
 
     _attr_name = "Power State"
@@ -41,14 +41,14 @@ class XgimiPowerBinarySensor(XgimiEntity, BinarySensorEntity):  # pyright: ignor
         super().__init__(coordinator, "power_state")
 
     @property
-    def is_on(self) -> bool | None:  # pyright: ignore[reportIncompatibleVariableOverride]
+    def is_on(self) -> bool | None:
         """Return True when the projector is Awake (display on), None if unknown."""
         if not self.coordinator.data:
             return False
         return self.coordinator.data.get("awake")
 
 
-class XgimiAdbConnectivityBinarySensor(XgimiEntity, BinarySensorEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
+class XgimiAdbConnectivityBinarySensor(XgimiEntity, BinarySensorEntity):
     """Binary sensor reporting whether the projector ADB daemon is reachable on the network."""
 
     _attr_name = "ADB Connectivity"
@@ -59,7 +59,7 @@ class XgimiAdbConnectivityBinarySensor(XgimiEntity, BinarySensorEntity):  # pyri
         super().__init__(coordinator, "adb_connectivity")
 
     @property
-    def is_on(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]
+    def is_on(self) -> bool:
         """Return True when ADB is reachable (Awake or Network Standby)."""
         if not self.coordinator.data:
             return False

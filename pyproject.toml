@@ -14,7 +14,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "deptry>=0.25.0",
-    "pyright>=1.1.0",
+    "pyrefly>=1.4.0",
     "pytest-homeassistant-custom-component>=0.13.0",
     "pytest>=9.0.0",
     "ruff>=0.17.0",
@@ -30,3 +30,9 @@ ignore = ["tests"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.pyrefly]
+project-includes = ["custom_components"]
+infer-with-first-use = false
+min-severity = "warn"
+# preset = "strict" # TODO: check if this even makes sense or is overkill for this project

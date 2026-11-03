@@ -14,7 +14,7 @@ run() {
 run uv run ruff check custom_components/xgimi tests/
 run uv run ruff format --check custom_components/xgimi tests/
 
-run uv run pyright custom_components/xgimi
+run uv run pyrefly check
 
 run uv run deptry custom_components/xgimi
 

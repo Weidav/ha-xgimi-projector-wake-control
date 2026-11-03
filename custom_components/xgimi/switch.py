@@ -25,7 +25,7 @@ async def async_setup_entry(
     async_add_entities([XgimiPowerSwitch(coordinator)])
 
 
-class XgimiPowerSwitch(XgimiEntity, SwitchEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
+class XgimiPowerSwitch(XgimiEntity, SwitchEntity):
     """Representation of the XGIMI Projector Power Switch (Two-Stage Wake & Idempotent Off)."""
 
     _attr_name = "Power"
@@ -36,12 +36,12 @@ class XgimiPowerSwitch(XgimiEntity, SwitchEntity):  # pyright: ignore[reportInco
         super().__init__(coordinator, "power")
 
     @property
-    def available(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]
+    def available(self) -> bool:
         """Keep the power switch available so WoWLAN wake can be triggered from deep sleep."""
         return True
 
     @property
-    def is_on(self) -> bool | None:  # pyright: ignore[reportIncompatibleVariableOverride]
+    def is_on(self) -> bool | None:
         """Return True if the projector display is awake, None if unknown."""
         if not self.coordinator.data:
             return False

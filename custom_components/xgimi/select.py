@@ -23,7 +23,7 @@ async def async_setup_entry(
     async_add_entities([XgimiInputSourceSelect(coordinator)])
 
 
-class XgimiInputSourceSelect(XgimiEntity, SelectEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
+class XgimiInputSourceSelect(XgimiEntity, SelectEntity):
     """Input source select entity (Apps, HDMI 1, HDMI 2)."""
 
     _attr_name = "Input Source"
@@ -35,7 +35,7 @@ class XgimiInputSourceSelect(XgimiEntity, SelectEntity):  # pyright: ignore[repo
         self._attr_options = list(INPUT_SOURCES)
 
     @property
-    def current_option(self) -> str | None:  # pyright: ignore[reportIncompatibleVariableOverride]
+    def current_option(self) -> str | None:
         """Return the currently active input source."""
         if not self.coordinator.data:
             return INPUT_SOURCE_APPS
