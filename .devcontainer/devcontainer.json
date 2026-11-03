@@ -1,9 +1,6 @@
 {
     "name": "XGIMI HACS",
     "image": "python:3.14-trixie",
-    "mounts": [
-        "source=antigravity-state,target=/home/vscode/.gemini,type=volume"
-    ],
     "containerEnv": {
         "UV_LINK_MODE": "copy"
     },
@@ -30,6 +27,5 @@
                 "yzhang.markdown-all-in-one"
             ]
         }
-    },
-    "postCreateCommand": "sudo chown -R vscode:vscode \"$HOME/.gemini\" && curl -fsSL https://antigravity.google/cli/install.sh | bash && uv sync"
+    }
 }
