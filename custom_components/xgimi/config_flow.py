@@ -174,7 +174,7 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if self._auth_task is not None:
             if self._auth_task.done():
                 try:
-                    authorized = bool(self._auth_task.result())
+                    authorized = self._auth_task.result()
                 except (AdbError, TimeoutError, OSError) as err:
                     _LOGGER.debug("ADB authorization background task failed: %s", err)
                 except asyncio.CancelledError:

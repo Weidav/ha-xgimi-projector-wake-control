@@ -34,11 +34,15 @@ class XgimiPowerBinarySensor(XgimiEntity, BinarySensorEntity):
     """Binary sensor reporting whether the projector display is Awake."""
 
     _attr_name = "Power State"
-    _attr_device_class = BinarySensorDeviceClass.POWER
 
     def __init__(self, coordinator: XgimiDataUpdateCoordinator) -> None:
         """Initialize the power state binary sensor."""
         super().__init__(coordinator, "power_state")
+
+    @property
+    def device_class(self) -> BinarySensorDeviceClass:
+        """Return the power device class."""
+        return BinarySensorDeviceClass.POWER
 
     @property
     def is_on(self) -> bool | None:
@@ -52,15 +56,19 @@ class XgimiAdbConnectivityBinarySensor(XgimiEntity, BinarySensorEntity):
     """Binary sensor reporting whether the projector ADB daemon is reachable on the network."""
 
     _attr_name = "ADB Connectivity"
-    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
 
     def __init__(self, coordinator: XgimiDataUpdateCoordinator) -> None:
         """Initialize the ADB connectivity binary sensor."""
         super().__init__(coordinator, "adb_connectivity")
 
     @property
+    def device_class(self) -> BinarySensorDeviceClass:
+        """Return the connectivity device class."""
+        return BinarySensorDeviceClass.CONNECTIVITY
+
+    @property
     def is_on(self) -> bool:
         """Return True when ADB is reachable (Awake or Network Standby)."""
         if not self.coordinator.data:
             return False
-        return bool(self.coordinator.data.get("online", False))
+        return self.coordinator.data.get("online", False)

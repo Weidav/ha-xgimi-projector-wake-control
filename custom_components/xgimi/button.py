@@ -80,12 +80,16 @@ class XgimiRestartButton(XgimiEntity, ButtonEntity):
 
     _attr_name = "Restart Projector"
     _attr_icon = "mdi:restart"
-    _attr_device_class = ButtonDeviceClass.RESTART
     _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, coordinator: XgimiDataUpdateCoordinator) -> None:
         """Initialize the restart button."""
         super().__init__(coordinator, "button_restart")
+
+    @property
+    def device_class(self) -> ButtonDeviceClass:
+        """Return the restart button device class."""
+        return ButtonDeviceClass.RESTART
 
     async def async_press(self) -> None:
         """Reboot the projector."""
