@@ -2,10 +2,14 @@
 
 [![Validate](https://github.com/Weidav/ha-xgimi-projector-wake-control/actions/workflows/validate.yml/badge.svg)](https://github.com/Weidav/ha-xgimi-projector-wake-control/actions/workflows/validate.yml)
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![Beta](https://img.shields.io/badge/status-beta-orange.svg)](#)
 
 A standalone Home Assistant integration for **XGIMI Google TV / Android 14 projectors** (designed and verified on the **XGIMI Horizon 20** series, `XR14A` / MediaTek `MT9689`).
 
 This integration operates **natively against stock factory XGIMI firmware** over **ADB TCP (`5555`)** and **MediaTek WoWLAN**.
+
+> [!NOTE]
+> **Beta release:** `0.1.0-beta.1` is the first public beta. Core features are usable, but expect rough edges — please report issues on the [issue tracker](https://github.com/Weidav/ha-xgimi-projector-wake-control/issues).
 
 ## Key Features
 
@@ -34,6 +38,7 @@ Unlike Home Assistant's built-in **Android TV Remote** integration—which disco
    - **Repository**: `https://github.com/Weidav/ha-xgimi-projector-wake-control`
    - **Category**: `Integration`
 4. Click **Add**, find **XGIMI Projector Wake & Control** in HACS, and click **Download**.
+   - **Beta:** enable **Show beta versions** in HACS to see `0.1.0-beta.x` releases.
 5. Restart Home Assistant.
 
 ### Option 2: Manual Installation
@@ -103,7 +108,6 @@ If the projector is unreachable, make sure it is on and **USB debugging / Wirele
 
 ## TODO
 
-- test the hardened wake-up / power-on for a few days
 - check if the "Enable ADB over TCP" matches the projecetor settings-menu naming
 - add a table of XGIMI Projectors where this is tested on
 - add a github-issue blueprint for users to add projectors, or suggest them to edit the table
