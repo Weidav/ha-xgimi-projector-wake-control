@@ -8,6 +8,11 @@
         "PATH": "/home/vscode/.local/bin:${containerEnv:PATH}"
     },
     "remoteUser": "vscode",
+    "mounts": [
+        "source=xgimi-hacs-opencode-data,target=/home/vscode/.local,type=volume",
+        "source=xgimi-hacs-opencode-config,target=/home/vscode/.config,type=volume"
+    ],
+    "postCreateCommand": "sudo install -d -o vscode -g vscode /home/vscode/.local /home/vscode/.config",
     "features": {
         "ghcr.io/devcontainers/features/common-utils:2": {
             "username": "vscode"
