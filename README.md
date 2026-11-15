@@ -90,18 +90,16 @@ The integration creates **20 dedicated entities** for complete local control wit
 
 ## Troubleshooting
 
-### "Re-authenticate" / ADB key rejected
+### Re-authentication required
 
-The integration stores a persistent RSA key in `<config>/.storage/xgimi_adb_key` and the projector remembers it after the one-time **Allow USB debugging?** prompt. The projector can forget that key (for example after a firmware update, a factory reset, or when Home Assistant's `.storage` was restored from an older backup). In that case ADB answers but rejects every command, so the projector can no longer be controlled or woken.
+The projector no longer accepts Home Assistant's ADB key (e.g. after a firmware update or factory reset).
 
-Home Assistant now detects this and shows a **Re-authentication required** notification instead of silently treating the projector as offline:
+1. Turn the projector on.
+2. Open **Settings -> Devices & Services -> XGIMI Projector Wake & Control** and click **Re-authenticate**.
+3. On the projector, check **Always allow from this computer** in the **Allow USB debugging?** prompt and select **OK**.
+4. Click **Submit** in Home Assistant.
 
-1. Turn the projector on and make sure it is on the same network.
-2. Open **Settings -> Devices & Services -> XGIMI Projector Wake & Control** and click **Re-authenticate** (or follow the repair notification).
-3. On the projector, check **Always allow from this computer** in the **Allow USB debugging?** dialog and select **OK**.
-4. Click **Submit** in Home Assistant. The entry reloads automatically and control is restored.
-
-If the projector is unreachable during re-authentication, verify that it is powered on and that **USB debugging / Wireless ADB on port 5555** is still enabled in **Developer Options**.
+If the projector is unreachable, make sure it is on and **USB debugging / Wireless ADB (port 5555)** is enabled in **Developer Options**.
 
 ## TODO
 
