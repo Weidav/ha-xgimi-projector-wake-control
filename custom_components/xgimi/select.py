@@ -47,4 +47,4 @@ class XgimiInputSourceSelect(XgimiEntity, SelectEntity):
         if option not in INPUT_SOURCES:
             raise HomeAssistantError(f"Unsupported input source: {option}")
         if not await self.coordinator.async_set_input_source(option):
-            raise HomeAssistantError(f"Failed to switch XGIMI projector input source to {option}")
+            raise HomeAssistantError(self.failure_message(f"Failed to switch XGIMI projector input source to {option}"))

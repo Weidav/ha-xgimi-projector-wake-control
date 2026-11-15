@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.9] - 2026-11-15
+
+### Fixed
+- **ADB Key Rejection Recovery**: A projector that answers ADB but rejects the stored key is no longer misreported as "offline or in deep sleep". The coordinator now raises `ConfigEntryAuthFailed`, Home Assistant shows a **Re-authentication required** repair, and a new reauth flow re-triggers the on-screen **Allow USB debugging?** prompt and reloads the entry once approved.
+- **Fast Wake Failure on Rejected Key**: `turn_on` aborts immediately when the projector rejects the ADB key instead of sending WoWLAN knocks and wake keys for the full 30s budget.
+- **Actionable Entity Errors**: Power, key, input-source, and restart entities now point to re-authentication instead of a generic failure when the key is rejected.
+- **Unknown State Instead of "Off"**: A rejected key no longer reports the projector as powered off.
+
+---
+
 ## [0.0.8] - 2026-10-27
 
 ### Fixed

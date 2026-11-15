@@ -50,9 +50,11 @@ class XgimiPowerSwitch(XgimiEntity, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the projector on via Two-Stage WoWLAN + ADB Wake."""
         if not await self.coordinator.async_turn_on():
-            raise HomeAssistantError(f"Failed to wake XGIMI projector at {self.coordinator.host}")
+            raise HomeAssistantError(self.failure_message(f"Failed to wake XGIMI projector at {self.coordinator.host}"))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Put the projector into standby idempotently via ADB."""
         if not await self.coordinator.async_turn_off():
-            raise HomeAssistantError(f"Failed to turn off XGIMI projector at {self.coordinator.host}")
+            raise HomeAssistantError(
+                self.failure_message(f"Failed to turn off XGIMI projector at {self.coordinator.host}")
+            )

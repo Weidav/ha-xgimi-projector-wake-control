@@ -23,6 +23,12 @@ MDNS_WAKE_PORT = 5353
 # Persistent RSA-2048 ADB key storage filename inside Home Assistant .storage
 ADB_KEY_STORAGE_FILE = "xgimi_adb_key"
 
+# User-facing error shown when the projector rejects the stored ADB key
+ADB_REAUTH_REQUIRED_MESSAGE = (
+    "The XGIMI projector rejected the stored ADB key. Re-authenticate the integration "
+    "(Settings > Devices & services > XGIMI > Re-authenticate) and allow USB debugging on the projector."
+)
+
 # Input sources
 INPUT_SOURCE_APPS = "Apps"
 INPUT_SOURCE_HDMI1 = "HDMI 1"

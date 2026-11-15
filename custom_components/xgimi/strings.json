@@ -13,13 +13,18 @@
       "authorize": {
         "title": "Authorize ADB Connection",
         "description": "Check your projector screen ({host}) for the **Allow USB debugging?** prompt, check **Always allow from this computer**, select **OK**, and then click **Submit**."
+      },
+      "reauth_confirm": {
+        "title": "Re-authorize ADB Connection",
+        "description": "The projector no longer accepts Home Assistant's stored ADB key. Make sure the projector is turned on, check its screen ({host}) for the **Allow USB debugging?** prompt, check **Always allow from this computer**, select **OK**, and then click **Submit**."
       }
     },
     "error": {
       "invalid_host": "Invalid hostname or IP address (do not include http:// or paths).",
       "invalid_mac": "Invalid MAC address format (expected XX:XX:XX:XX:XX:XX).",
       "cannot_connect": "Unable to reach projector ADB on port 5555. Verify the IP address and ensure ADB debugging is enabled.",
-      "adb_not_authorized": "ADB authorization was not approved on the projector yet. Please select 'Always allow from this computer' -> OK on the projector and try again."
+      "adb_not_authorized": "ADB authorization was not approved on the projector yet. Please select 'Always allow from this computer' -> OK on the projector and try again.",
+      "projector_unreachable": "The projector could not be reached. Turn it on, make sure it is connected to the network, and that Wireless ADB debugging is enabled."
     },
     "abort": {
       "already_configured": "This XGIMI projector is already configured."

@@ -13,7 +13,7 @@ from custom_components.xgimi.config_flow import (
     XgimiOptionsFlowHandler,
     _validate_host,
 )
-from custom_components.xgimi.const import CONF_HOST, CONF_MAC
+from custom_components.xgimi.const import CONF_ADB_PORT, CONF_HOST, CONF_MAC
 
 
 def _make_flow_hass() -> MagicMock:
@@ -300,3 +300,74 @@ async def test_config_and_options_flow_on_declared_minimum_ha_version() -> None:
     assert res["data"][CONF_HOST] == "192.168.1.80"
     assert res["data"][CONF_MAC] == "aa:bb:cc:dd:ee:88"
     mock_uid.assert_awaited_once_with("aa:bb:cc:dd:ee:88")
+
+
+@pytest.mark.asyncio
+async def test_reauth_flow_repairs_rejected_adb_key() -> None:
+    """Verify reauth re-triggers the on-screen prompt and reloads the entry once approved."""
+    flow = XgimiConfigFlow()
+    flow.hass = _make_flow_hass()
+
+    fake_entry = MagicMock()
+    fake_entry.data = {CONF_HOST: "192.168.1.50", CONF_NAME: "Kino", CONF_ADB_PORT: 5555}
+    fake_entry.options = {}
+
+    fake_adb = MagicMock()
+    # prompt task, explicit retry, re-triggered prompt
+    fake_adb.async_authorize = AsyncMock(side_effect=[False, False, True])
+    fake_adb.async_probe_status = AsyncMock(return_value="unauthorized")
+    fake_adb.async_close = AsyncMock()
+
+    with (
+        patch.object(flow, "_get_reauth_entry", MagicMock(return_value=fake_entry)),
+        patch("custom_components.xgimi.config_flow.XgimiAdbClient", return_value=fake_adb),
+    ):
+        form = await flow.async_step_reauth({})
+        assert form["type"] == "form"
+        assert form["step_id"] == "reauth_confirm"
+        assert form["description_placeholders"] == {"host": "192.168.1.50"}
+
+        # User has not approved on the projector yet
+        res_pending = await flow.async_step_reauth_confirm({})
+        assert res_pending["type"] == "form"
+        assert res_pending["errors"] == {"base": "adb_not_authorized"}
+        fake_adb.async_probe_status.assert_awaited_once()
+
+        # User approved on the projector -> entry is reloaded and the flow aborts
+        with patch.object(
+            flow,
+            "async_update_reload_and_abort",
+            MagicMock(return_value={"type": "abort", "reason": "reauth_successful"}),
+        ) as mock_abort:
+            res_ok = await flow.async_step_reauth_confirm({})
+
+    assert res_ok["type"] == "abort"
+    mock_abort.assert_called_once_with(fake_entry, data_updates={CONF_HOST: "192.168.1.50"})
+    fake_adb.async_close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reauth_flow_reports_unreachable_projector() -> None:
+    """Verify reauth distinguishes an unreachable projector from a pending approval."""
+    flow = XgimiConfigFlow()
+    flow.hass = _make_flow_hass()
+
+    fake_entry = MagicMock()
+    fake_entry.data = {CONF_HOST: "192.168.1.50", CONF_NAME: "Kino"}
+    fake_entry.options = {}
+
+    fake_adb = MagicMock()
+    fake_adb.async_authorize = AsyncMock(return_value=False)
+    fake_adb.async_probe_status = AsyncMock(return_value="unreachable")
+    fake_adb.async_close = AsyncMock()
+
+    with (
+        patch.object(flow, "_get_reauth_entry", MagicMock(return_value=fake_entry)),
+        patch("custom_components.xgimi.config_flow.XgimiAdbClient", return_value=fake_adb),
+    ):
+        await flow.async_step_reauth({})
+        res = await flow.async_step_reauth_confirm({})
+
+    assert res["type"] == "form"
+    assert res["errors"] == {"base": "projector_unreachable"}
+    fake_adb.async_close.assert_not_awaited()

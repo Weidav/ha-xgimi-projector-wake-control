@@ -8,8 +8,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 import pytest
+from homeassistant.exceptions import ConfigEntryAuthFailed
 
-from custom_components.xgimi.adb_client import AdbConnectionError, AdbError
+from custom_components.xgimi.adb_client import AdbAuthError, AdbConnectionError, AdbError
 from custom_components.xgimi.const import (
     CAST_WAKE_PORT,
     CONF_MAC,
@@ -1997,5 +1998,103 @@ async def test_async_update_data_skips_when_power_lock_locked() -> None:
             adb.async_shell.assert_not_called()
         finally:
             coord._power_lock.release()
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_auth_rejection_triggers_reauth_instead_of_standby() -> None:
+    """Verify a rejected ADB key raises ConfigEntryAuthFailed and recovers after authorization."""
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=AdbAuthError("ADB key not authorized on projector [IP_ADDRESS]:5555"))
+
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "[IP_ADDRESS]", "Test", adb_client=adb)
+    coord.mac = "aa:bb:cc:dd:ee:ff"
+    try:
+        assert coord.adb_auth_required is False
+
+        with pytest.raises(ConfigEntryAuthFailed):
+            await coord._async_update_data()
+
+        assert coord.adb_auth_required is True
+
+        # A later successful poll (after re-authentication) clears the flag again
+        adb.async_shell = AsyncMock(
+            return_value="---WAKE---\nmWakefulness=Awake\n---META---\nXR14A\n14\n",
+        )
+        data = await coord._async_update_data()
+        assert data["awake"] is True
+        assert coord.adb_auth_required is False
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_turn_on_aborts_immediately_when_adb_key_rejected() -> None:
+    """Verify wake aborts fast on a rejected key instead of knocking for the full 30s budget."""
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_send_key = AsyncMock()
+    adb.async_shell = AsyncMock(side_effect=AdbAuthError("ADB key not authorized on projector [IP_ADDRESS]:5555"))
+
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "[IP_ADDRESS]", "Test", adb_client=adb)
+    coord.mac = "aa:bb:cc:dd:ee:ff"
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()) as mock_knocks:
+            started = time.monotonic()
+            ok = await coord.async_turn_on(wake_timeout=30.0, poll_interval=0.05)
+            elapsed = time.monotonic() - started
+
+        assert ok is False
+        assert elapsed < 5.0
+        assert coord.adb_auth_required is True
+        assert mock_knocks.await_count == 1
+        adb.async_send_key.assert_not_awaited()
+        assert coord.data["awake"] is None
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_turn_on_fails_fast_when_key_still_unauthorized() -> None:
+    """Verify wake does not send WoWLAN knocks when the key is known to be rejected."""
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_send_key = AsyncMock()
+    adb.async_probe_status = AsyncMock(return_value="unauthorized")
+
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "[IP_ADDRESS]", "Test", adb_client=adb)
+    coord._adb_auth_required = True
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()) as mock_knocks:
+            assert await coord.async_turn_on(wake_timeout=30.0) is False
+
+        mock_knocks.assert_not_awaited()
+        adb.async_probe_status.assert_awaited_once()
+        adb.async_send_key.assert_not_awaited()
+    finally:
+        await coord.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_turn_on_clears_auth_flag_after_successful_probe() -> None:
+    """Verify a successful authorization probe clears the rejected-key flag and allows waking."""
+    adb = MagicMock()
+    adb.async_close = AsyncMock()
+    adb.async_probe_status = AsyncMock(return_value="authorized")
+    adb.async_send_key = AsyncMock()
+    adb.async_shell = AsyncMock(return_value="mWakefulness=Awake")
+
+    coord = XgimiDataUpdateCoordinator(_make_fake_hass(), "[IP_ADDRESS]", "Test", adb_client=adb)
+    coord.mac = "aa:bb:cc:dd:ee:ff"
+    coord._adb_auth_required = True
+    coord.async_set_updated_data(coord.default_state(online=True, awake=True))
+    try:
+        with patch.object(coord, "_send_wowlan_knocks", AsyncMock()):
+            assert await coord.async_turn_on(wake_timeout=2.0, poll_interval=0.05) is True
+
+        assert coord.adb_auth_required is False
+        assert coord.data["awake"] is True
     finally:
         await coord.async_shutdown()
