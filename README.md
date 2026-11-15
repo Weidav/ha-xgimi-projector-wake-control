@@ -95,7 +95,7 @@ The integration creates **20 dedicated entities** for complete local control wit
 The projector no longer accepts Home Assistant's ADB key (e.g. after a firmware update or factory reset).
 
 1. Turn the projector on.
-2. Open **Settings -> Devices & Services -> XGIMI Projector Wake & Control** and click **Re-authenticate**.
+2. In Home Assistant, open **Settings -> Devices & Services -> XGIMI Projector Wake & Control** and click **Re-authenticate**.
 3. On the projector, check **Always allow from this computer** in the **Allow USB debugging?** prompt and select **OK**.
 4. Click **Submit** in Home Assistant.
 
