@@ -8,9 +8,6 @@ A standalone Home Assistant integration for **XGIMI Google TV / Android 14 proje
 
 This integration operates **natively against stock factory XGIMI firmware** over **ADB TCP (`5555`)** and **MediaTek WoWLAN**.
 
-> [!NOTE]
-> **0.1.0** is the first stable release. The project is still pre-1.0, so behavior may change between minor versions — please report issues on the [issue tracker](https://github.com/Weidav/ha-xgimi-projector-wake-control/issues).
-
 ## Key Features
 
 Unlike Home Assistant's built-in **Android TV Remote** integration—which disconnects in standby and only exposes generic TV controls—this integration is built specifically for XGIMI projectors:
