@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Mapping
 from typing import Any, cast
 
 import voluptuous as vol
@@ -161,40 +162,14 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._adb = XgimiAdbClient(self._host, port=DEFAULT_ADB_PORT, hass=self.hass)
 
         if user_input is None:
-            # Trigger the on-screen ADB Allow dialog in the background while user views instructions
-            if self._auth_task is None or self._auth_task.done():
-                self._auth_task = self.hass.async_create_task(self._adb.async_authorize(timeout=30.0))
+            await self._async_start_auth_prompt()
             return self.async_show_form(
                 step_id="authorize",
                 data_schema=cast(Any, vol.Schema({})),
                 description_placeholders={"host": self._host},
             )
 
-        authorized = False
-        if self._auth_task is not None:
-            if self._auth_task.done():
-                try:
-                    authorized = self._auth_task.result()
-                except (AdbError, TimeoutError, OSError) as err:
-                    _LOGGER.debug("ADB authorization background task failed: %s", err)
-                except asyncio.CancelledError:
-                    pass
-            else:
-                # Wait up to 5s for the in-flight authorization prompt or cancel and verify
-                try:
-                    authorized = await asyncio.wait_for(asyncio.shield(self._auth_task), timeout=5.0)
-                except TimeoutError:
-                    pass
-                except (AdbError, OSError) as err:
-                    _LOGGER.debug("ADB authorization task error: %s", err)
-                if not self._auth_task.done():
-                    self._auth_task.cancel()
-                    try:
-                        await self._auth_task
-                    except (asyncio.CancelledError, AdbError, TimeoutError, OSError):
-                        pass
-            self._auth_task = None
-
+        authorized = await self._async_settle_auth_prompt()
         if not authorized:
             authorized = await self._adb.async_authorize(timeout=10.0)
 
@@ -205,7 +180,7 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self._async_finish_entry(self._host, self._name, self._mac)
 
         # Re-trigger background authorization prompt for the next attempt
-        self._auth_task = self.hass.async_create_task(self._adb.async_authorize(timeout=30.0))
+        await self._async_start_auth_prompt()
         errors["base"] = "adb_not_authorized"
         return self.async_show_form(
             step_id="authorize",
@@ -213,6 +188,87 @@ class XgimiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={"host": self._host},
         )
+
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
+        """Start re-authentication after the projector rejected the stored ADB key."""
+        entry = self._get_reauth_entry()
+        self._host = entry.options.get(CONF_HOST) or entry.data.get(CONF_HOST, DEFAULT_HOST)
+        self._name = entry.data.get(CONF_NAME, DEFAULT_NAME)
+        self._mac = format_mac(entry.options.get(CONF_MAC) or entry.data.get(CONF_MAC))
+        port = entry.options.get(CONF_ADB_PORT) or entry.data.get(CONF_ADB_PORT, DEFAULT_ADB_PORT)
+        self._adb = XgimiAdbClient(self._host, port=port, hass=self.hass)
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Re-run the on-screen ADB Allow prompt and verify the projector accepts our key."""
+        errors: dict[str, str] = {}
+        if self._adb is None:
+            self._adb = XgimiAdbClient(self._host, port=DEFAULT_ADB_PORT, hass=self.hass)
+
+        if user_input is None:
+            await self._async_start_auth_prompt()
+            return self.async_show_form(
+                step_id="reauth_confirm",
+                data_schema=cast(Any, vol.Schema({})),
+                description_placeholders={"host": self._host},
+            )
+
+        authorized = await self._async_settle_auth_prompt()
+        if not authorized:
+            authorized = await self._adb.async_authorize(timeout=10.0)
+
+        if authorized:
+            await self._adb.async_close()
+            return self.async_update_reload_and_abort(
+                self._get_reauth_entry(),
+                data_updates={CONF_HOST: self._host},
+            )
+
+        status = await self._adb.async_probe_status(timeout=3.0)
+        errors["base"] = "projector_unreachable" if status == "unreachable" else "adb_not_authorized"
+
+        # Re-trigger background authorization prompt for the next attempt
+        await self._async_start_auth_prompt()
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=cast(Any, vol.Schema({})),
+            errors=errors,
+            description_placeholders={"host": self._host},
+        )
+
+    async def _async_start_auth_prompt(self) -> None:
+        """Start the on-screen ADB Allow dialog in the background (idempotent)."""
+        if self._adb is None:
+            return
+        if self._auth_task is None or self._auth_task.done():
+            self._auth_task = self.hass.async_create_task(self._adb.async_authorize(timeout=30.0))
+
+    async def _async_settle_auth_prompt(self) -> bool:
+        """Wait briefly for the in-flight background authorization task and return its result."""
+        if self._auth_task is None:
+            return False
+
+        task = self._auth_task
+        authorized = False
+        if task.done():
+            with contextlib.suppress(AdbError, TimeoutError, OSError, asyncio.CancelledError):
+                authorized = task.result()
+        else:
+            # Wait up to 5s for the in-flight authorization prompt or cancel and verify
+            try:
+                authorized = await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+            except TimeoutError:
+                pass
+            except (AdbError, OSError) as err:
+                _LOGGER.debug("ADB authorization task error: %s", err)
+            except asyncio.CancelledError:
+                pass
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, AdbError, TimeoutError, OSError):
+                    await task
+        self._auth_task = None
+        return authorized
 
     async def _async_finish_entry(self, host: str, name: str, mac: str | None) -> ConfigFlowResult:
         """Set unique ID and create the ConfigEntry."""

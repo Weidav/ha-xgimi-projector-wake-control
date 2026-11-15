@@ -16,10 +16,11 @@ from urllib.parse import quote
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .adb_client import AdbError, XgimiAdbClient
+from .adb_client import AdbAuthError, AdbError, XgimiAdbClient
 from .const import (
     CAST_WAKE_PORT,
     CONF_ADB_PORT,
@@ -460,6 +461,31 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
         self._model: str = name
         self._sw_version: str = "14"
         self._delayed_refresh_tasks: set[asyncio.Task[Any]] = set()
+        self._adb_auth_required: bool = False
+
+    @property
+    def adb_auth_required(self) -> bool:
+        """Return True if the projector rejected our ADB key and re-authentication is needed."""
+        return self._adb_auth_required
+
+    def _mark_adb_auth_required(self, err: Exception | None = None) -> None:
+        """Remember that the projector rejected our ADB key and warn once about it."""
+        if not self._adb_auth_required:
+            self._adb_auth_required = True
+            _LOGGER.warning(
+                "ADB key for XGIMI projector %s was rejected by the projector. "
+                "Re-authenticate the integration (Settings > Devices & services > XGIMI > Re-authenticate) "
+                "and allow USB debugging on the projector.",
+                self.host,
+            )
+        elif err is not None:
+            _LOGGER.debug("ADB key still not authorized on %s: %s", self.host, err)
+
+    def _clear_adb_auth_required(self) -> None:
+        """Clear the rejected-key flag after a successful authenticated poll."""
+        if self._adb_auth_required:
+            _LOGGER.info("ADB key for XGIMI projector %s is authorized again", self.host)
+            self._adb_auth_required = False
 
     def default_state(self, *, online: bool = False, awake: bool | None = False) -> XgimiCoordinatorData:
         """Return a structured state dictionary."""
@@ -562,6 +588,21 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                 }
                 self.async_set_updated_data(current)
 
+            # 0a. Fail fast if the projector previously rejected our ADB key. A successful probe
+            # clears the flag (e.g. after re-authentication); an unreachable projector may simply
+            # be asleep, so continue with the normal wake sequence in that case.
+            if self._adb_auth_required:
+                status = await self.adb.async_probe_status(timeout=2.0)
+                if status == "authorized":
+                    self._clear_adb_auth_required()
+                elif status == "unauthorized":
+                    _LOGGER.warning(
+                        "Cannot wake XGIMI projector %s: ADB key not authorized. Re-authenticate the integration.",
+                        self.host,
+                    )
+                    _record_wake_failure()
+                    return False
+
             try:
                 # 0. Quick pre-check: if projector is already recorded as awake and no power transition is pending
                 if (
@@ -657,6 +698,15 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                             consecutive_errors = 0
                             if settle_state is False:
                                 settled_to_standby = True
+                        except AdbAuthError as err:
+                            _LOGGER.warning(
+                                "[%s] [+%.2fs] Cannot wake projector: ADB key rejected. Re-authenticate the integration.",
+                                self.host,
+                                time.monotonic() - start_time,
+                            )
+                            self._mark_adb_auth_required(err)
+                            _record_wake_failure()
+                            return False
                         except (AdbError, TimeoutError, OSError) as err:
                             last_adb_reachable = False
                             last_observed_wakefulness = None
@@ -729,6 +779,17 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                             "Awake" if awake is True else ("Asleep" if awake is False else "None/indeterminate"),
                             attempt,
                         )
+                    except AdbAuthError as err:
+                        # Definitive: the ADB daemon is up but rejects our key. No amount of
+                        # WoWLAN knocking or power keys can fix this, so stop immediately.
+                        _LOGGER.warning(
+                            "[%s] [+%.2fs] Cannot wake projector: ADB key rejected. Re-authenticate the integration.",
+                            self.host,
+                            time.monotonic() - start_time,
+                        )
+                        self._mark_adb_auth_required(err)
+                        _record_wake_failure()
+                        return False
                     except (AdbError, TimeoutError, OSError) as err:
                         awake = None
                         last_adb_reachable = False
@@ -1002,6 +1063,10 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
 
             try:
                 awake = await self._async_read_wakefulness(timeout=4.0)
+            except AdbAuthError as err:
+                self._mark_adb_auth_required(err)
+                _LOGGER.warning("Cannot turn off XGIMI projector %s (ADB key rejected): %s", self.host, err)
+                return False
             except (AdbError, TimeoutError, OSError) as err:
                 _LOGGER.warning("Cannot turn off XGIMI projector %s (ADB unreachable): %s", self.host, err)
                 return False
@@ -1079,6 +1144,10 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
                 uri = f"content://android.media.tv/passthrough/{encoded_id}"
                 cmd = f'am start -a android.intent.action.VIEW -d "{uri}"'
                 res = await self.adb.async_shell(cmd, timeout=5.0)
+        except AdbAuthError as err:
+            self._mark_adb_auth_required(err)
+            _LOGGER.warning("Failed to switch input source to %s on %s (ADB key rejected): %s", source, self.host, err)
+            return False
         except (AdbError, TimeoutError, OSError) as err:
             _LOGGER.warning("Failed to switch input source to %s on %s: %s", source, self.host, err)
             return False
@@ -1102,6 +1171,10 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
         try:
             await self.adb.async_send_key(keycode, timeout=4.0)
             return True
+        except AdbAuthError as err:
+            self._mark_adb_auth_required(err)
+            _LOGGER.warning("Failed to send keycode %s to %s (ADB key rejected): %s", keycode, self.host, err)
+            return False
         except (AdbError, TimeoutError, OSError, ValueError) as err:
             _LOGGER.warning("Failed to send keycode %s to %s: %s", keycode, self.host, err)
             return False
@@ -1110,6 +1183,10 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
         """Reboot the projector via ADB shell."""
         try:
             await self.adb.async_shell("setprop sys.powerctl reboot || svc power reboot", timeout=4.0)
+        except AdbAuthError as err:
+            self._mark_adb_auth_required(err)
+            _LOGGER.warning("Failed to reboot projector %s (ADB key rejected): %s", self.host, err)
+            return False
         except (AdbError, TimeoutError, OSError) as err:
             _LOGGER.warning("Failed to reboot projector %s: %s", self.host, err)
             return False
@@ -1197,7 +1274,12 @@ class XgimiDataUpdateCoordinator(DataUpdateCoordinator[XgimiCoordinatorData]):
 
         try:
             raw = await self.adb.async_shell(POLL_SHELL_COMMAND, timeout=4.5)
+            self._clear_adb_auth_required()
             return self._parse_compound_poll(raw)
+        except AdbAuthError as err:
+            # The projector answered but rejected our key: this is not standby, it needs re-pairing.
+            self._mark_adb_auth_required(err)
+            raise ConfigEntryAuthFailed(f"ADB key rejected by XGIMI projector at {self.host}") from err
         except (AdbError, TimeoutError, OSError) as err:
             _LOGGER.debug("Projector %s offline or in deep sleep: %s", self.host, err)
             now = time.monotonic()

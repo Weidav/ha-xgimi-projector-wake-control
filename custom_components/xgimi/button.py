@@ -56,7 +56,9 @@ class XgimiKeyButton(XgimiEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Send the configured keycode over ADB."""
         if not await self.coordinator.async_send_key(self._keycode):
-            raise HomeAssistantError(f"Failed to send key '{self._attr_name}' ({self._keycode}) to projector")
+            raise HomeAssistantError(
+                self.failure_message(f"Failed to send key '{self._attr_name}' ({self._keycode}) to projector")
+            )
 
 
 class XgimiWakeButton(XgimiEntity, ButtonEntity):
@@ -72,7 +74,7 @@ class XgimiWakeButton(XgimiEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Trigger the two-stage wake sequence."""
         if not await self.coordinator.async_turn_on():
-            raise HomeAssistantError(f"Failed to wake XGIMI projector at {self.coordinator.host}")
+            raise HomeAssistantError(self.failure_message(f"Failed to wake XGIMI projector at {self.coordinator.host}"))
 
 
 class XgimiRestartButton(XgimiEntity, ButtonEntity):
@@ -94,4 +96,6 @@ class XgimiRestartButton(XgimiEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Reboot the projector."""
         if not await self.coordinator.async_reboot():
-            raise HomeAssistantError(f"Failed to restart XGIMI projector at {self.coordinator.host}")
+            raise HomeAssistantError(
+                self.failure_message(f"Failed to restart XGIMI projector at {self.coordinator.host}")
+            )
