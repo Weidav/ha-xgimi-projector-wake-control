@@ -88,6 +88,19 @@ The integration creates **20 dedicated entities** for complete local control wit
 | `button` | **Assistant**            | `mdi:microphone`                    | `219` (`KEYCODE_ASSISTANT`)  | Activates Google Assistant voice prompt.                                                                                                                                              |
 | `button` | **Restart Projector**    | `mdi:restart`                       | Shell Reboot                 | Reboots the projector via ADB shell (`EntityCategory.CONFIG`, device class: `restart`).                                                                                               |
 
+## Troubleshooting
+
+### Re-authentication required
+
+The projector no longer accepts Home Assistant's ADB key (e.g. after a firmware update or factory reset).
+
+1. Turn the projector on.
+2. In Home Assistant, open **Settings -> Devices & Services -> XGIMI Projector Wake & Control** and click **Re-authenticate**.
+3. On the projector, check **Always allow from this computer** in the **Allow USB debugging?** prompt and select **OK**.
+4. Click **Submit** in Home Assistant.
+
+If the projector is unreachable, make sure it is on and **USB debugging / Wireless ADB (port 5555)** is enabled in **Developer Options**.
+
 ## TODO
 
 - test the hardened wake-up / power-on for a few days

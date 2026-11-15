@@ -12,6 +12,7 @@ from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, Device
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
+    ADB_REAUTH_REQUIRED_MESSAGE,
     CONF_ADB_PORT,
     CONF_HOST,
     CONF_MAC,
@@ -93,6 +94,12 @@ class XgimiEntity(CoordinatorEntity[XgimiDataUpdateCoordinator]):
         entry_id = coordinator.config_entry.entry_id if coordinator.config_entry is not None else coordinator.host
         self._entry_id = entry_id
         self._attr_unique_id = f"{entry_id}_{unique_suffix}"
+
+    def failure_message(self, fallback: str) -> str:
+        """Return an ADB re-authentication hint when the projector rejected our key."""
+        if self.coordinator.adb_auth_required:
+            return ADB_REAUTH_REQUIRED_MESSAGE
+        return fallback
 
     @property
     def device_info(self) -> DeviceInfo:

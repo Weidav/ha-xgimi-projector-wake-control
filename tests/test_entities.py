@@ -77,6 +77,7 @@ def _make_mock_coordinator() -> MagicMock:
     coord.async_reboot = AsyncMock(return_value=True)
     coord.async_shutdown = AsyncMock()
     coord.adb_port = 5555
+    coord.adb_auth_required = False
     coord.default_state = MagicMock(return_value={"online": False, "awake": False})
     return coord
 
@@ -283,3 +284,42 @@ async def test_buttons_autofocus_settings_wake_and_restart() -> None:
     coord.async_reboot = AsyncMock(return_value=False)
     with pytest.raises(HomeAssistantError, match="Failed to restart"):
         await restart_btn.async_press()
+
+
+@pytest.mark.asyncio
+async def test_auth_rejected_entities_surface_reauth_hint() -> None:
+    """Verify entities point to re-authentication when the projector rejects the ADB key."""
+    coord = _make_mock_coordinator()
+    coord.adb_auth_required = True
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"entry_123": coord}}
+    entry = coord.config_entry
+
+    switches: list[XgimiPowerSwitch] = []
+    await async_setup_switches(hass, entry, switches.extend)
+    sw = switches[0]
+
+    coord.data = {"online": True, "awake": None}
+    assert sw.is_on is None
+
+    coord.async_turn_on = AsyncMock(return_value=False)
+    with pytest.raises(HomeAssistantError, match="Re-authenticate"):
+        await sw.async_turn_on()
+
+    buttons = []
+    await async_setup_buttons(hass, entry, buttons.extend)
+    autofocus_btn = next(b for b in buttons if b.unique_id == "entry_123_key_autofocus")
+    coord.async_send_key = AsyncMock(return_value=False)
+    with pytest.raises(HomeAssistantError, match="Re-authenticate"):
+        await autofocus_btn.async_press()
+
+    selects: list[XgimiInputSourceSelect] = []
+    await async_setup_selects(hass, entry, selects.extend)
+    coord.async_set_input_source = AsyncMock(return_value=False)
+    with pytest.raises(HomeAssistantError, match="Re-authenticate"):
+        await selects[0].async_select_option(INPUT_SOURCE_HDMI1)
+
+    # Once the key is accepted again, ordinary failure messages are used
+    coord.adb_auth_required = False
+    with pytest.raises(HomeAssistantError, match="Failed to wake"):
+        await sw.async_turn_on()
